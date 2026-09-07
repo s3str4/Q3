@@ -1,0 +1,22 @@
+{
+  "name": "arena-duel",
+  "version": "0.1.0",
+  "description": "Quake 3-style 1v1 arena duel: browser client, headless Node authoritative server, shared deterministic simulation.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server/index.mjs",
+    "server": "node server/index.mjs",
+    "test": "node --test tests/",
+    "duel": "node tools/bot_duel.mjs",
+    "evidence": "node tools/evidence.mjs",
+    "netbench": "node tools/netbench.mjs"
+  },
+  "dependencies": {
+    "three": "0.169.0",
+    "ws": "8.18.0"
+  },
+  "devDependencies": {
+    "puppeteer-core": "23.6.0"
+  }
+}

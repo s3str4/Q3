@@ -1,0 +1,4 @@
+node_modules/
+.evidence/
+tools/scratch/
+*.log
