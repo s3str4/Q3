@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arena Duel</title>
+<link rel="stylesheet" href="/client/style.css">
+<script type="importmap">
+{ "imports": { "three": "/vendor/three/build/three.module.js", "three/addons/": "/vendor/three/examples/jsm/" } }
+</script>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="hud" class="hidden">
+  <div id="crosshair"><div class="ch-dot"></div></div>
+  <div id="hitmarker"></div>
+  <div id="damage-flash"></div>
+  <div id="hud-bottom">
+    <div class="stat health"><span class="label">HEALTH</span><span id="hp" class="value">125</span></div>
+    <div class="stat armor"><span class="label">ARMOR</span><span id="ar" class="value">0</span></div>
+    <div class="stat ammo"><span class="label" id="wname">MACHINEGUN</span><span id="ammo" class="value">100</span></div>
+  </div>
+  <div id="weapons"></div>
+  <div id="hud-top">
+    <div id="scores"><span id="score-me" class="score me">0</span><span id="timer">10:00</span><span id="score-them" class="score them">0</span></div>
+    <div id="names"><span id="name-me"></span><span id="name-them"></span></div>
+  </div>
+  <div id="pickup-msg"></div>
+  <div id="center-msg"></div>
+  <div id="obituary"></div>
+  <div id="netgraph"><span id="ng-ping">0 ms</span> <span id="ng-fps">0 fps</span> <span id="ng-frame"></span> <span id="ng-snap"></span></div>
+  <div id="speedometer">0</div>
+  <div id="item-timers"></div>
+</div>
+<div id="scoreboard" class="hidden"></div>
+<div id="menu">
+  <div class="panel">
+    <h1>ARENA DUEL</h1>
+    <p class="sub">Quake III style 1v1 · 60 Hz authoritative netcode · lag-compensated hitscan</p>
+    <label>Name <input id="name" maxlength="24" value=""></label>
+    <label>Server <input id="server" value=""></label>
+    <div class="row">
+      <button id="btn-connect" class="primary">CONNECT</button>
+      <button id="btn-practice">PRACTICE VS BOT</button>
+    </div>
+    <details><summary>Direct P2P (no server, invite code)</summary>
+      <div class="row"><button id="btn-host">HOST GAME</button><button id="btn-join">JOIN WITH CODE</button></div>
+      <textarea id="p2p-code" placeholder="invite / answer code" rows="3"></textarea>
+      <div id="p2p-status"></div>
+    </details>
+    <details><summary>Settings</summary>
+      <label>Sensitivity <input id="sens" type="range" min="1" max="20" step="0.5" value="5"><span id="sens-v">5</span></label>
+      <label>FOV <input id="fov" type="range" min="80" max="130" step="1" value="100"><span id="fov-v">100</span></label>
+      <label>Master volume <input id="vol" type="range" min="0" max="1" step="0.05" value="0.8"></label>
+      <label><input id="opt-cshair" type="checkbox"> Large crosshair</label>
+      <label><input id="opt-interp" type="range" min="1" max="4" step="1" value="2"> Interpolation (snapshots)</label>
+    </details>
+    <p class="help">WASD move · Space jump · Ctrl crouch · Mouse fire · 1-7 / wheel weapons · Tab scoreboard · Esc menu</p>
+    <div id="menu-status"></div>
+  </div>
+</div>
+<script type="module" src="/client/main.js"></script>
+</body>
+</html>
