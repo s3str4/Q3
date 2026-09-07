@@ -1,20 +1,22 @@
 // Transports: WebSocket client, and a WebRTC DataChannel pair for direct P2P (host/guest) with manual signaling.
 import { encode, decode } from '../../shared/protocol.js';
 
+// Works unchanged in browsers and in Node >= 22 (global WebSocket); bytesIn/bytesOut count wire text bytes for netbench.
 export class WsTransport {
-  constructor(url) { this.url = url; this.onmessage = null; this.onclose = null; this.onopen = null; this.ws = null; }
+  constructor(url) { this.url = url; this.onmessage = null; this.onclose = null; this.onopen = null; this.ws = null; this.bytesIn = 0; this.bytesOut = 0; this.msgsIn = 0; }
   connect() {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(this.url);
       this.ws = ws;
       ws.onopen = () => { this.onopen && this.onopen(); resolve(); };
-      ws.onerror = (e) => reject(new Error('websocket error'));
+      ws.onerror = () => reject(new Error('websocket error'));
       ws.onclose = () => this.onclose && this.onclose();
-      ws.onmessage = (ev) => { const m = decode(ev.data); if (m && this.onmessage) this.onmessage(m); };
+      ws.onmessage = (ev) => { if (typeof ev.data !== 'string') return; this.bytesIn += ev.data.length; this.msgsIn++; const m = decode(ev.data); if (m && this.onmessage) this.onmessage(m); };
     });
   }
-  send(obj) { if (this.ws && this.ws.readyState === 1) this.ws.send(encode(obj)); }
+  send(obj) { if (this.ws && this.ws.readyState === 1) { const s = encode(obj); this.bytesOut += s.length; this.ws.send(s); } }
   close() { this.ws && this.ws.close(); }
+  get open() { return !!this.ws && this.ws.readyState === 1; }
 }
 
 // ---- WebRTC P2P with copy/paste signaling (no server at all) ----

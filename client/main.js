@@ -71,8 +71,7 @@ async function start(mode) {
     hud.setMap(map);
     cg = new ClientGame(map, transport, { mode: gameMode, name: settings.name, interpSnaps: settings.interp, onEvent: onEvent, onKick: (r) => stop('kicked: ' + r), onInfo: () => {} });
     transport.onclose = () => stop('disconnected');
-    if (mode.bot) { const orig = cg.join.bind(cg); cg.join = () => { transport.send({ t: 'join', name: settings.name, v: 3, bot: true, botSkill: 0.6 }); cg.pingTimer = setInterval(() => cg.ping(), 500); cg.ping(); }; }
-    cg.join();
+    cg.join(mode.bot ? { bot: true, botSkill: 0.6 } : {}); // ClientGame.join sends the protocol version and retries until WELCOME
     input = input || new Input(canvas, { sensitivity: settings.sens, requireLock: !params.get('nolock'), onEscape: () => { if (running) { $('menu').classList.remove('hidden'); status('paused - click CONNECT to resume or reload'); } }, onScoreboard: (s) => hud.scoreboard(s, cg), currentWeapon: () => cg.predicted ? cg.predicted.weapon : 0, hasWeapon: (w) => cg.predicted ? (cg.predicted.weapons & (1 << w)) !== 0 : true });
     input.sensitivity = settings.sens;
     running = true;

@@ -25,20 +25,42 @@ export class ClientGame {
     this.predicted = null; // predicted local player state (ps + stats)
     this.misprediction = 0; this.corrections = 0; this.mispredMax = 0;
     this.lastSnapAt = 0; this.snapGaps = [];
-    this.stats = { snapsReceived: 0, bytesIn: 0, cmdsSent: 0 };
+    this.stats = { snapsReceived: 0, bytesIn: 0, cmdsSent: 0, acked: 0 };
     this.pendingLocalEvents = []; // predicted events (fire) awaiting server confirmation dedupe
     this.rules = null; this.serverLagComp = true;
     this.viewSmoothZ = 0; this.stepSmooth = 0;
+    this.snapClock = []; this._snapClockDirty = true; this._snapClockSorted = [];
     transport.onmessage = (m) => this.handle(m);
     this.remote = new Map(); // id -> { origin, angles, velocity, ... } interpolated
   }
 
-  join() { this.transport.send({ t: MSG.JOIN, name: this.name, v: PROTOCOL_VERSION }); this.pingTimer = setInterval(() => this.ping(), 500); this.ping(); }
-  close() { clearInterval(this.pingTimer); this.transport.close(); }
+  // opts.bot: ask the server to add a practice bot (with opts.botSkill) when the match has room.
+  join(opts = {}) {
+    const msg = { t: MSG.JOIN, name: this.name, v: PROTOCOL_VERSION };
+    if (opts.bot) { msg.bot = true; msg.botSkill = opts.botSkill ?? 0.6; }
+    this.transport.send(msg);
+    // resend until WELCOME arrives (unreliable P2P channel / simulated loss); the server ignores duplicate joins
+    this.joinTimer = setInterval(() => { if (this.localId) clearInterval(this.joinTimer); else this.transport.send(msg); }, 500);
+    this.pingTimer = setInterval(() => this.ping(), 500); this.ping();
+  }
+  close() { clearInterval(this.pingTimer); clearInterval(this.joinTimer); this.transport.close(); }
   ping() { this.transport.send({ t: MSG.PING, c: performance.now(), rtt: Math.round(this.clock.rtt) }); }
 
-  // estimated current server time
+  // estimated current server time (NTP-style from pings; used for stats only)
   serverTime() { return performance.now() + this.clock.offset; }
+
+  // Render clock (Q3 cl.serverTime): derived from snapshot ARRIVAL, not from the ping estimate, so it always trails
+  // the newest snapshot by the interpolation delay and we interpolate instead of extrapolating. We take a low
+  // percentile of (snap.t - recvAt) over the last ~1.5 s so jitter bunching does not push us ahead of the data.
+  renderTime(now = performance.now()) {
+    const s = this.snapClock;
+    if (!s.length) return this.serverTime() - this.interpDelayMs();
+    if (this._snapClockDirty) { this._snapClockSorted = [...s].sort((a, b) => a - b); this._snapClockDirty = false; }
+    const sorted = this._snapClockSorted;
+    const offset = sorted[Math.floor(sorted.length * 0.1)];
+    return now + offset - this.interpDelayMs();
+  }
+  interpDelayMs() { return (1000 / this.snapRate) * this.interpSnaps; }
 
   handle(m) {
     switch (m.t) {
@@ -73,6 +95,7 @@ export class ClientGame {
     this.lastSnapAt = now;
     this.stats.snapsReceived++;
     snap.recvAt = now;
+    this.snapClock.push(snap.t - now); if (this.snapClock.length > 90) this.snapClock.shift(); this._snapClockDirty = true;
     this.snapshots.push(snap);
     if (this.snapshots.length > 32) this.snapshots.shift();
     // events
@@ -80,21 +103,38 @@ export class ClientGame {
     // reconcile local player
     const me = snap.players.find((p) => p.id === this.localId);
     if (!me) return;
-    const predictedBefore = this.predicted ? copy(this.predicted.ps.origin) : null;
+    const prev = this.predicted;
+    const predictedBefore = prev ? copy(prev.ps.origin) : null;
+    const wasDead = prev ? prev.dead : true;
+    const prevSpawn = prev ? prev.spawnTime : -1, prevTele = prev ? (prev.teleportSeq || 0) : 0;
     // authoritative state -> game, then replay unacked commands
     this.game.applySnapshot(snap, this.localId);
     const p = this.game.players.get(this.localId);
     this.pending = this.pending.filter((c) => c.seq > me.ack);
-    const beforeReplay = copy(p.ps.origin);
+    this.stats.acked = me.ack;
     for (const c of this.pending) this.game.runPlayerCommand(p, c, true);
-    if (predictedBefore && !p.dead) {
+    // A respawn or teleport moves the player by design (the server picks the spot); it is not a misprediction.
+    const reset = p.spawnTime !== prevSpawn || (p.teleportSeq || 0) !== prevTele || wasDead;
+    if (predictedBefore && !p.dead && !reset) {
       const err = dist(predictedBefore, p.ps.origin);
       this.misprediction = err;
       if (err > 0.05) { this.corrections++; this.mispredMax = Math.max(this.mispredMax, err); }
       // smooth small corrections on the view (Q3 does not, but it avoids visible pops at higher ping)
       if (err > 0.5 && err < 64) { this.errorOffset = [predictedBefore[0] - p.ps.origin[0], predictedBefore[1] - p.ps.origin[1], predictedBefore[2] - p.ps.origin[2]]; this.errorTime = now; }
-    }
+    } else if (reset) { this.errorOffset = null; this.misprediction = 0; }
     this.predicted = p;
+  }
+
+  // Observed snapshot rate (Hz) over the last ~60 snapshots, and RTT/jitter as measured by pings.
+  netStats() {
+    const gaps = this.snapGaps;
+    const mean = gaps.length ? gaps.reduce((a, b) => a + b, 0) / gaps.length : 0;
+    const t = this.transport;
+    return {
+      snapHz: mean ? 1000 / mean : 0, snaps: this.stats.snapsReceived, cmds: this.stats.cmdsSent, acked: this.stats.acked || 0, extrapolated: this.stats.extrapolated || 0,
+      rtt: this.clock.rtt, jitter: this.clock.jitter, misprediction: this.misprediction, mispredMax: this.mispredMax, corrections: this.corrections,
+      bytesIn: t.bytesIn || 0, bytesOut: t.bytesOut || 0,
+    };
   }
 
   dispatchEvent(e) {
@@ -112,8 +152,8 @@ export class ClientGame {
     if (!this.localId || !this.predicted) return null;
     const p = this.predicted;
     this.seq++;
-    const interpDelayMs = (1000 / this.snapRate) * this.interpSnaps;
-    const cmd = { seq: this.seq, forward: input.forward, right: input.right, up: input.up, buttons: input.buttons, angles: [input.pitch, input.yaw, 0], weapon: input.weapon, vt: Math.round(this.serverTime() - interpDelayMs) };
+    // vt: the server time whose remote positions we are showing right now (see renderTime); the server rewinds hitscan to it
+    const cmd = { seq: this.seq, forward: input.forward, right: input.right, up: input.up, buttons: input.buttons, angles: [input.pitch, input.yaw, 0], weapon: input.weapon, vt: Math.round(this.renderTime()) };
     const events = this.game.runPlayerCommand(p, cmd, true);
     for (const e of events) { if (e.type === EV.FIRE) this.pendingLocalEvents.push({ seq: e.seq, t: performance.now() }); this.onEvent(e, true); }
     this.pendingLocalEvents = this.pendingLocalEvents.filter((x) => performance.now() - x.t < 2000);
@@ -128,8 +168,8 @@ export class ClientGame {
 
   // Interpolated view of remote entities at render time.
   interpolate() {
-    const interpDelayMs = (1000 / this.snapRate) * this.interpSnaps;
-    const renderTime = this.serverTime() - interpDelayMs;
+    const renderTime = this.renderTime();
+    this.lastRenderTime = renderTime;
     const snaps = this.snapshots;
     if (snaps.length === 0) return;
     let a = null, b = null;
@@ -140,6 +180,7 @@ export class ClientGame {
     let f = 0;
     if (b && b.t > a.t) f = Math.max(0, Math.min(1, (renderTime - a.t) / (b.t - a.t)));
     if (!b) { // extrapolate a little (max 50 ms) from velocity
+      this.stats.extrapolated = (this.stats.extrapolated || 0) + 1;
       const dt = Math.min(0.05, Math.max(0, (renderTime - a.t) / 1000));
       for (const pa of a.players) {
         if (pa.id === this.localId) continue;

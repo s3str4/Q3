@@ -9,7 +9,7 @@ export function newPlayerState() {
   return {
     origin: [0, 0, 0], velocity: [0, 0, 0], viewangles: [0, 0, 0],
     pmFlags: 0, pmTime: 0, groundEntity: false, viewHeight: PM.viewHeight,
-    jumpPadTime: 0, bobCycle: 0, stepTime: 0,
+    jumpPadTime: 0, padIndex: -1, bobCycle: 0, stepTime: 0,
   };
 }
 

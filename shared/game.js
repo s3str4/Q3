@@ -9,6 +9,10 @@ import { angleVectors, add, sub, scale, ma, dot, length, normalize, dist, copy, 
 import { BRUSH_FLAGS, jumppadVelocity } from './map.js';
 
 const EYE = (p) => [p.ps.origin[0], p.ps.origin[1], p.ps.origin[2] + p.ps.viewHeight];
+// Command queue bound (server side). Beyond this a client is effectively disconnected; keep the newest.
+export const MAX_CMD_QUEUE = 90;
+// Ticks without any client command before the server starts advancing the player with empty commands.
+export const COAST_AFTER_TICKS = 30; // 500 ms
 
 export class Game {
   constructor(map, opts = {}) {
@@ -37,9 +41,10 @@ export class Game {
     const p = {
       id, name: name || `player${id}`, ps: newPlayerState(), health: 0, armor: 0, dead: true, deathTime: -1e9, spawnTime: 0,
       weapon: WEAPONS.MACHINEGUN, pendingWeapon: 0, weaponState: 'ready', weaponTime: 0, ammo: {}, weapons: 0,
-      frags: 0, deaths: 0, damageDealt: 0, damageTaken: 0, hits: 0, shots: 0, lastCmdSeq: 0, cmdQueue: [], lastCmd: null,
+      frags: 0, deaths: 0, damageDealt: 0, damageTaken: 0, hits: 0, shots: 0, lastCmdSeq: 0, cmdQueue: [], lastCmd: null, idleTicks: 0,
       attackHeld: false, history: [], mins: PM.mins, maxs: PM.maxs, origin: [0, 0, 0], isBot: !!opts.isBot, ready: false,
       viewTime: 0, respawnPending: false, lastPain: 0, healthDecayAt: 0, lastFootstep: 0, killer: null, ping: 0, connectedAt: this.time, meansOfDeath: 0,
+      shotsBy: {}, hitsBy: {}, lastHitTick: {}, spawnAngles: [0, 0, 0], teleportSeq: 0,
     };
     this.players.set(id, p);
     if (this.match.state !== 'playing' || this.mode === 'duel') this.spawnPlayer(p, true);
@@ -91,25 +96,37 @@ export class Game {
     // Q3 SelectRandomFurthestSpawnPoint: choose randomly among the spawns farthest from the enemy (and away from the death spot).
     const enemy = this.other(p);
     const avoid = enemy && !enemy.dead ? enemy.ps.origin : (p.lastDeathOrigin || null);
-    const candidates = spawns.filter((s) => !this.spawnBlocked(s));
+    const candidates = spawns.filter((s) => !this.spawnBlocked(s, p));
     const list = candidates.length ? candidates : spawns;
     if (!avoid) return list[Math.floor(this.rng() * list.length)];
     const scored = list.map((s) => ({ s, d: dist(s.origin, avoid) })).sort((a, b) => b.d - a.d);
     const top = scored.slice(0, Math.max(1, Math.ceil(scored.length / 2)));
     return top[Math.floor(this.rng() * top.length)].s;
   }
-  spawnBlocked(s) {
-    for (const q of this.players.values()) if (!q.dead && boxesOverlap(s.origin, PM.mins, PM.maxs, q.ps.origin, q.mins, q.maxs)) return true;
+  // Is a live player (other than the one spawning) standing on this spot? (Q3 SpotWouldTelefrag)
+  spawnBlocked(s, self = null) {
+    for (const q of this.players.values()) if (q !== self && !q.dead && boxesOverlap(s.origin, PM.mins, PM.maxs, q.ps.origin, q.mins, q.maxs)) return true;
     return false;
   }
 
   // ---------- commands ----------
+  // Queue a client command. Clients send the last few commands redundantly (loss tolerance), and unreliable
+  // transports may reorder, so: drop anything already executed or already queued, keep the queue sorted by seq.
   queueCommand(id, cmd) {
     const p = this.players.get(id);
-    if (!p) return;
-    if (cmd.seq <= p.lastCmdSeq) return; // duplicate / out of order
-    p.cmdQueue.push(cmd);
-    if (p.cmdQueue.length > 64) p.cmdQueue.splice(0, p.cmdQueue.length - 64);
+    if (!p) return false;
+    if (cmd.seq <= p.lastCmdSeq) return false; // duplicate / already executed
+    const q = p.cmdQueue;
+    if (q.length && cmd.seq <= q[q.length - 1].seq) {
+      // out of order or duplicate of a queued command: insert in seq order (or ignore if present)
+      let i = q.length - 1;
+      while (i >= 0 && q[i].seq > cmd.seq) i--;
+      if (i >= 0 && q[i].seq === cmd.seq) return false;
+      q.splice(i + 1, 0, cmd);
+    } else q.push(cmd);
+    if (q.length > MAX_CMD_QUEUE) q.splice(0, q.length - MAX_CMD_QUEUE);
+    p.idleTicks = 0;
+    return true;
   }
 
   // Server tick: consume queued commands, advance projectiles, items, match state.
@@ -120,8 +137,11 @@ export class Game {
     for (const p of this.players.values()) {
       let n = 0;
       if (p.cmdQueue.length === 0) {
-        // no input this tick: keep physics running with the last command (buttons cleared) so the player still falls/slides
-        if (p.lastCmd) this.runPlayerCommand(p, { ...p.lastCmd, seq: p.lastCmdSeq, buttons: 0, forward: 0, right: 0, up: 0, repeat: true });
+        // No input this tick. Like Q3, a player only moves when their commands arrive, so timer phase jitter
+        // between client and server never desyncs prediction. Only after a real stall (client frozen, tab hidden,
+        // network outage) do we "coast" with an empty command so the body still falls / slides / burns in lava.
+        p.idleTicks = (p.idleTicks || 0) + 1;
+        if (p.lastCmd && p.idleTicks > COAST_AFTER_TICKS) this.runPlayerCommand(p, { ...p.lastCmd, seq: p.lastCmdSeq, buttons: 0, forward: 0, right: 0, up: 0, repeat: true });
       } else {
         while (p.cmdQueue.length && n < this.maxCmdsPerTick) {
           const cmd = p.cmdQueue.shift();
@@ -178,13 +198,19 @@ export class Game {
   }
 
   touchTriggers(p, events, predict) {
-    for (const t of this.map.triggers) {
+    // Q3 (BG_TouchJumpPad / jumppad_ent): a pad fires once per contact; it is re-armed only after the player leaves
+    // its volume. This is state-based (padIndex in the player state, carried in snapshots), not time-based, so
+    // client prediction replays it identically.
+    let touchingPad = -1;
+    for (let ti = 0; ti < this.map.triggers.length; ti++) {
+      const t = this.map.triggers[ti];
       if (!boxesOverlapAbs(p.ps.origin, p.mins, p.maxs, t.mins, t.maxs)) continue;
       if (t.kind === 'jumppad') {
-        if (this.time - p.ps.jumpPadTime < 100 && p.ps.lastPad === t) continue;
+        touchingPad = ti;
+        if (p.ps.padIndex === ti) continue;
         p.ps.velocity = jumppadVelocity([(t.mins[0] + t.maxs[0]) / 2, (t.mins[1] + t.maxs[1]) / 2, t.maxs[2]], t.target, PM.gravity);
         p.ps.groundEntity = false;
-        p.ps.jumpPadTime = this.time; p.ps.lastPad = t;
+        p.ps.jumpPadTime = this.time; p.ps.padIndex = ti;
         events.push({ type: EV.JUMPPAD, origin: copy(p.ps.origin) });
       } else if (t.kind === 'teleporter') {
         p.ps.origin = copy(t.dest);
@@ -196,6 +222,7 @@ export class Game {
         if (this.time - (p.lastLava || 0) >= 200) { p.lastLava = this.time; this.damage(p, null, 30, [0, 0, 0], p.ps.origin, 'lava', 0); }
       }
     }
+    if (touchingPad < 0) p.ps.padIndex = -1;
   }
 
   touchItems(p) {
@@ -238,8 +265,8 @@ export class Game {
 
   // ---------- weapons ----------
   weaponLogic(p, cmd, events, predict) {
-    const msec = Math.round(FRAMETIME * 1000);
-    if (p.weaponTime > 0) p.weaponTime -= msec;
+    // exact 1/60 s accounting (a rounded 17 ms would make the rail refire in 89 ticks = 1483 ms instead of 1500)
+    if (p.weaponTime > 0) { p.weaponTime -= TICK_MS; if (p.weaponTime < 1e-6) p.weaponTime = 0; }
     // weapon selection
     if (cmd.weapon && cmd.weapon !== p.weapon && cmd.weapon !== p.pendingWeapon && (p.weapons & (1 << cmd.weapon))) {
       p.pendingWeapon = cmd.weapon;
@@ -256,7 +283,7 @@ export class Game {
     if (p.weaponTime > 0) return;
     const attack = (cmd.buttons & BUTTONS.ATTACK) !== 0;
     if (!attack) { p.attackHeld = false; return; }
-    if (p.attackHeld && WEAPON_DEFS[p.weapon].melee) return; // gauntlet needs re-press? Q3 gauntlet auto-repeats; keep simple: allow hold
+    if (p.attackHeld && WEAPON_DEFS[p.weapon].melee) return; // gauntlet: fire held through a respawn must be released first
     if (this.match.state === 'countdown' || this.match.state === 'ended') return;
     const wd = WEAPON_DEFS[p.weapon];
     const ammo = p.ammo[p.weapon] ?? 0;
@@ -271,6 +298,7 @@ export class Game {
     if (ammo > 0) p.ammo[p.weapon] = ammo - 1;
     p.weaponTime = wd.refire;
     p.shots++;
+    if (!predict) p.shotsBy[p.weapon] = (p.shotsBy[p.weapon] || 0) + 1;
     const eye = EYE(p);
     const av = angleVectors(p.ps.viewangles);
     const seed = (p.lastCmdSeq * 7919 + p.id * 104729) >>> 0;
@@ -433,7 +461,7 @@ export class Game {
     if (this.mode === 'arena' && this.match.roundState !== 'live') return;
     let knockback = damage;
     if (knockback > PM.maxKnockback) knockback = PM.maxKnockback;
-    if (mod === 'fall' || mod === 'lava') knockback = 0;
+    if (mod === 'fall' || mod === 'lava' || target.noKnockback) knockback = 0; // noKnockback: Q3 FL_NO_KNOCKBACK (tests)
     if (knockback && dir) {
       const d = normalize(dir);
       const mass = PM.mass;
@@ -460,9 +488,13 @@ export class Game {
     target.health -= take;
     target.damageTaken += take + asave;
     target.lastPain = this.time;
-    if (attacker && attacker !== target) { attacker.damageDealt += take + asave; attacker.hits++; }
+    if (attacker && attacker !== target) {
+      attacker.damageDealt += take + asave; attacker.hits++;
+      // per-weapon accuracy: count one hit per weapon per tick (shotgun pellets / splash count once)
+      if (typeof mod === 'number' && attacker.lastHitTick[mod] !== this.tick) { attacker.lastHitTick[mod] = this.tick; attacker.hitsBy[mod] = (attacker.hitsBy[mod] || 0) + 1; }
+    }
     this.events.push({ type: EV.PAIN, id: target.id, attacker: attacker ? attacker.id : 0, damage: take + asave, health: target.health, origin: copy(target.ps.origin), mod, self: attacker === target });
-    if (attacker && attacker !== target) this.events.push({ type: EV.HIT, id: attacker.id, target: target.id, damage: take + asave, origin: copy(point) });
+    if (attacker && attacker !== target) this.events.push({ type: EV.HIT, id: attacker.id, target: target.id, damage: take + asave, origin: copy(point), weapon: typeof mod === 'number' ? mod : 0 });
     if (target.health <= 0) this.killPlayer(target, attacker, mod, take + asave);
   }
 
@@ -593,7 +625,7 @@ export class Game {
         id: p.id, n: p.name, o: p.ps.origin, v: p.ps.velocity, a: [p.ps.viewangles[0], p.ps.viewangles[1]], h: p.health, ar: p.armor, w: p.weapon, pw: p.pendingWeapon,
         ws: p.weaponState, wt: p.weaponTime, d: p.dead ? 1 : 0, f: p.frags, dt: p.deaths, pf: p.ps.pmFlags, pt: p.ps.pmTime, g: p.ps.groundEntity ? 1 : 0,
         vh: p.ps.viewHeight, wp: p.weapons, am: p.ammo, ack: p.lastCmdSeq, ah: p.attackHeld ? 1 : 0, bot: p.isBot ? 1 : 0, ping: p.ping, ts: p.teleportSeq || 0,
-        dd: p.damageDealt, hits: p.hits, shots: p.shots, jt: p.ps.jumpPadTime, hd: p.healthDecayAt, dth: p.deathTime,
+        dd: p.damageDealt, hits: p.hits, shots: p.shots, jt: p.ps.jumpPadTime, jp: p.ps.padIndex ?? -1, hd: p.healthDecayAt, dth: p.deathTime, st: p.spawnTime, sy: p.spawnAngles[1],
       });
     }
     const projectiles = [];
@@ -616,6 +648,7 @@ export class Game {
       p.dead = !!sp.d; p.frags = sp.f; p.deaths = sp.dt; p.ps.pmFlags = sp.pf; p.ps.pmTime = sp.pt; p.ps.groundEntity = !!sp.g; p.ps.viewHeight = sp.vh;
       p.weapons = sp.wp; p.ammo = { ...sp.am }; p.lastCmdSeq = sp.ack; p.attackHeld = !!sp.ah; p.isBot = !!sp.bot; p.ping = sp.ping; p.teleportSeq = sp.ts;
       p.damageDealt = sp.dd; p.hits = sp.hits; p.shots = sp.shots; p.ps.jumpPadTime = sp.jt; p.healthDecayAt = sp.hd; p.deathTime = sp.dth;
+      p.spawnTime = sp.st; p.spawnAngles = [0, sp.sy, 0]; p.ps.padIndex = sp.jp ?? -1;
       p.origin = p.ps.origin; p.mins = PM.mins; p.maxs = p.dead ? [15, 15, 8] : ((p.ps.pmFlags & PMF.DUCKED) ? PM.duckMaxs : PM.maxs);
     }
     for (const id of [...this.players.keys()]) if (!seen.has(id)) this.players.delete(id);

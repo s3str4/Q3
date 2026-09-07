@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Arena Duel</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%23ffb347'/%3E%3Ccircle cx='8' cy='8' r='3' fill='%23111'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/client/style.css">
 <script type="importmap">
 { "imports": { "three": "/vendor/three/build/three.module.js", "three/addons/": "/vendor/three/examples/jsm/" } }
@@ -12,25 +13,30 @@
 <body>
 <canvas id="gl"></canvas>
 <div id="hud" class="hidden">
+  <div id="damage-flash"></div>
+  <div id="pickup-flash"></div>
+  <div id="dmg-dirs"><div class="dmg-dir"></div><div class="dmg-dir"></div><div class="dmg-dir"></div><div class="dmg-dir"></div></div>
   <div id="crosshair"><div class="ch-dot"></div></div>
   <div id="hitmarker"></div>
-  <div id="damage-flash"></div>
-  <div id="hud-bottom">
-    <div class="stat health"><span class="label">HEALTH</span><span id="hp" class="value">125</span></div>
-    <div class="stat armor"><span class="label">ARMOR</span><span id="ar" class="value">0</span></div>
-    <div class="stat ammo"><span class="label" id="wname">MACHINEGUN</span><span id="ammo" class="value">100</span></div>
-  </div>
-  <div id="weapons"></div>
   <div id="hud-top">
-    <div id="scores"><span id="score-me" class="score me">0</span><span id="timer">10:00</span><span id="score-them" class="score them">0</span></div>
-    <div id="names"><span id="name-me"></span><span id="name-them"></span></div>
+    <div id="scores">
+      <div class="scorebox me"><span id="score-me" class="score">0</span><span id="name-me" class="pname"></span></div>
+      <div id="timer">10:00</div>
+      <div class="scorebox them"><span id="score-them" class="score">0</span><span id="name-them" class="pname"></span></div>
+    </div>
   </div>
+  <div id="obituary"></div>
+  <div id="item-timers"></div>
   <div id="pickup-msg"></div>
   <div id="center-msg"></div>
-  <div id="obituary"></div>
-  <div id="netgraph"><span id="ng-ping">0 ms</span> <span id="ng-fps">0 fps</span> <span id="ng-frame"></span> <span id="ng-snap"></span></div>
   <div id="speedometer">0</div>
-  <div id="item-timers"></div>
+  <div id="hud-bottom">
+    <div class="stat ammo"><svg class="icon" viewBox="0 0 32 32"><path id="ammo-icon" d="M12 4h8v6l2 2v16H10V12l2-2z" fill="currentColor"/></svg><div class="col"><span id="ammo" class="value">100</span><span id="wname" class="label">MACHINEGUN</span></div></div>
+    <div class="stat health"><svg class="icon" viewBox="0 0 32 32"><path d="M12 3h8v9h9v8h-9v9h-8v-9H3v-8h9z" fill="currentColor"/></svg><div class="col"><span id="hp" class="value">125</span><span class="label">HEALTH</span></div></div>
+    <div class="stat armor"><svg class="icon" viewBox="0 0 32 32"><path d="M16 2l12 4v10c0 8-5 13-12 16C9 29 4 24 4 16V6z" fill="currentColor"/></svg><div class="col"><span id="ar" class="value">0</span><span class="label">ARMOR</span></div></div>
+  </div>
+  <div id="weapons"></div>
+  <div id="netgraph"><canvas id="ng-canvas" width="180" height="44"></canvas><div id="ng-text"><span id="ng-fps">0 fps</span><span id="ng-frame"></span><span id="ng-ping">0 ms</span><span id="ng-snap"></span></div></div>
 </div>
 <div id="scoreboard" class="hidden"></div>
 <div id="menu">
