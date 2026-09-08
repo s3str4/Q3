@@ -25,8 +25,11 @@ $('fov').oninput = (e) => { settings.fov = +e.target.value; $('fov-v').textConte
 $('vol').oninput = (e) => { settings.vol = +e.target.value; audio.setVolume(settings.vol); save(); };
 $('opt-cshair').onchange = (e) => { settings.bigCrosshair = e.target.checked; $('crosshair').classList.toggle('large', settings.bigCrosshair); save(); };
 $('opt-interp').onchange = (e) => { settings.interp = +e.target.value; if (cg) cg.interpSnaps = settings.interp; save(); };
-$('btn-connect').onclick = () => start({ kind: 'ws', url: $('server').value.trim() });
-$('btn-practice').onclick = () => start({ kind: 'ws', url: $('server').value.trim(), bot: true });
+let staticPage = false; // true when the page is not served by a game server (GitHub Pages etc.)
+const NO_SERVER_MSG = 'This page has no game server behind it. To play someone: HOST GAME and send the room code (or JOIN with theirs). To join a dedicated server, enter its address (ws://host:27960) above.';
+$('btn-connect').onclick = () => { const url = $('server').value.trim(); if (staticPage && !url) { status(NO_SERVER_MSG); $('p2p-panel').open = true; return; } start({ kind: 'ws', url }); };
+// practice: server bot when a game server serves the page, otherwise an in-browser session with a bot (no network at all)
+$('btn-practice').onclick = () => { const url = $('server').value.trim(); if (staticPage && !url) start({ kind: 'local' }); else start({ kind: 'ws', url, bot: true }); };
 $('btn-host').onclick = () => start({ kind: 'host-room' });
 $('btn-join').onclick = () => start({ kind: 'join-room', room: $('room').value });
 $('room').addEventListener('keydown', (e) => { if (e.key === 'Enter') start({ kind: 'join-room', room: $('room').value }); });
@@ -39,10 +42,12 @@ const params = new URLSearchParams(location.search);
 const servedByGameServer = fetch('info', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
 servedByGameServer.then((info) => {
   if (info) return;
+  staticPage = true;
+  $('btn-connect').title = NO_SERVER_MSG; $('btn-practice').textContent = 'PRACTICE VS BOT (LOCAL)';
   $('p2p-panel').open = true;
   $('server').placeholder = 'ws://host:27960 (needs a running server)';
   if (!settings.server) $('server').value = '';
-  status('static page: use Direct P2P (invite link) or enter a server address');
+  status('No server behind this page: play with a room code (HOST GAME / JOIN) or practice locally.');
 });
 // Invite links: ?join=<invite code> pre-fills the code and starts the guest flow automatically.
 const roomParam = params.get('room');
@@ -68,12 +73,19 @@ async function start(mode) {
     audio.init(); audio.resume(); audio.setVolume(settings.vol);
     let transport, mapName = 'arena_duel', gameMode = 'duel';
     if (mode.kind === 'ws') {
+      if (!mode.url) throw new Error('no server address: enter ws://host:27960, or use HOST GAME / JOIN with a room code');
       transport = new WsTransport(normalizeWs(mode.url));
-      await transport.connect();
+      try { await transport.connect(); } catch { throw new Error('could not reach the server at ' + normalizeWs(mode.url) + ' (is it running and reachable?). For play without a server use HOST GAME / JOIN.'); }
       // ask the server which map it runs
-      if (!mode.url) throw new Error('no server address: enter ws://host:27960 or use Direct P2P');
       const info = await fetch(mode.url.replace(/^ws/, 'http').replace(/\/$/, '') + '/info').then((r) => r.json()).catch(() => null);
       if (info) { mapName = info.map; gameMode = info.mode; }
+    } else if (mode.kind === 'local') {
+      // practice without any server: the browser hosts the session and a bot fills the other slot
+      const map = await loadMap(mapName);
+      host = new BrowserHost(map, { mode: gameMode, log: (...m) => console.log('[host]', ...m) });
+      transport = host.localLink();
+      host.addBot(0.6);
+      transport.onmessage = null;
     } else if (mode.kind === 'host-room') {
       if (!PeerTransport.available()) throw new Error('signaling library not loaded; use the manual exchange below');
       const map = await loadMap(mapName);
