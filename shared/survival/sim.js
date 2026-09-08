@@ -16,6 +16,7 @@ const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
 // '/ 60' did) drains 16 hunger over the whole slice and vitals never matter. Per game-hour the slice costs ~48
 // hunger / ~66 thirst: eat once and drink twice to keep regen, the 7DTD pace.
 const VITALS_RATE = DAY.hoursPerSecond;
+export const INTERACT_LOCK = 0.18;   // seconds the player is held after an interaction (was 0.25); a hit cancels it
 export function emptyCmd() { return { move: [0, 0], aim: [0, 0], attack: false, interact: false, sprint: false, sneak: false, reload: false, build: false, slot: 0, use: null }; }
 
 export class SurvivalSim {
@@ -84,11 +85,37 @@ export class SurvivalSim {
     // a step is accepted when it ends free, or when it reduces an existing overlap (a body spawned or pushed a few
     // centimetres into a tile must be able to walk out instead of being wedged for good)
     const tryAxis = (nx, ny) => { const after = penetration(nx, ny); return after <= 1e-9 || after < penetration(e.x, e.y) - 1e-9; };
-    let moved = false;
-    if (dx && tryAxis(e.x + dx, e.y)) { e.x += dx; moved = true; }
-    if (dy && tryAxis(e.x, e.y + dy)) { e.y += dy; moved = true; }
+    let moved = false, blockedX = false, blockedY = false;
+    if (dx) { if (tryAxis(e.x + dx, e.y)) { e.x += dx; moved = true; } else blockedX = true; }
+    if (dy) { if (tryAxis(e.x, e.y + dy)) { e.y += dy; moved = true; } else blockedY = true; }
+    // wall slide: the dominant axis is blocked by a jamb or a corner while the row/column ahead has a passable tile
+    // within reach. Nudge perpendicular (<= SLIDE per tick, deterministic) toward that tile's centre and retry the
+    // step, so a body walking at a 1-tile doorway up to ~0.45 off-centre funnels through instead of stopping dead
+    // on the jamb (radius 0.34 leaves only 0.32 of a door tile for the centre; nobody hits that by hand).
+    const ady = Math.abs(dy), adx = Math.abs(dx);
+    if (blockedY && ady >= adx) { if (this.slideToward(e, 'x', dy, radius, blockFn, tryAxis) && tryAxis(e.x, e.y + dy)) { e.y += dy; moved = true; } }
+    else if (blockedX && adx >= ady) { if (this.slideToward(e, 'y', dx, radius, blockFn, tryAxis) && tryAxis(e.x + dx, e.y)) { e.x += dx; moved = true; } }
     e.x = clamp(e.x, radius, this.world.w - radius); e.y = clamp(e.y, radius, this.world.h - radius);
     return moved;
+  }
+  // Lateral correction for moveCircle: `axis` is the perpendicular axis to nudge along, `step` the blocked step on
+  // the other axis. Looks at the three tiles in the row/column the body is about to enter, picks the nearest
+  // passable one (by centre distance along `axis`, at most 1 tile away) and nudges up to SLIDE toward its centre.
+  // Returns true when the body moved. Pure function of the grid + position: deterministic, shared by zombies.
+  slideToward(e, axis, step, radius, blockFn, tryAxis) {
+    const SLIDE = 0.08; const w = this.world;
+    const along = axis === 'x' ? e.x : e.y, across = axis === 'x' ? e.y : e.x;
+    const aheadLine = Math.floor(across + Math.sign(step) * (radius + Math.abs(step)));
+    const base = Math.floor(along); let best = null, bd = 1.0 + 1e-9;
+    for (const t of [base - 1, base, base + 1]) {
+      const tx = axis === 'x' ? t : aheadLine, ty = axis === 'x' ? aheadLine : t;
+      if (!w.inBounds(tx, ty) || blockFn(tx, ty)) continue;
+      const d = Math.abs(t + 0.5 - along); if (d < bd) { bd = d; best = t + 0.5; }
+    }
+    if (best == null || bd < 1e-6) return false;
+    const n = clamp(best - along, -SLIDE, SLIDE);
+    if (axis === 'x') { if (!tryAxis(e.x + n, e.y)) return false; e.x += n; } else { if (!tryAxis(e.x, e.y + n)) return false; e.y += n; }
+    return true;
   }
   // displace e by (dx, dy) only if the destination circle is free of blocking tiles (per axis, like moveCircle)
   nudge(e, dx, dy, radius, blockFn) {
@@ -174,8 +201,9 @@ export class SurvivalSim {
     if (p.reloadT > 0) { p.reloadT -= DT; if (p.reloadT <= 0) { const need = WEAPONS.pistol.mag - p.mag; const n = Math.min(need, this.count('ammo')); this.take('ammo', n); p.mag += n; this.emit(EV.RELOAD_DONE, { mag: p.mag, x: p.x, y: p.y }); } }
     if (cmd.reload && !this.prevReload) this.reload();
     this.prevReload = !!cmd.reload;
-    // stagger / attack / interact lock movement briefly
-    const busy = (p.state === PSTATE.STAGGER && p.stateT < PLAYER.hurtStagger) || (p.state === PSTATE.ATTACK && p.stateT < 0.18) || (p.state === PSTATE.INTERACT && p.stateT < 0.25);
+    // stagger / attack / interact lock movement briefly (interact 0.18 s: long enough to read as an action, short
+    // enough that a chop or a barricade never pins the player under a zombie; a hit also cancels it, see hurtPlayer)
+    const busy = (p.state === PSTATE.STAGGER && p.stateT < PLAYER.hurtStagger) || (p.state === PSTATE.ATTACK && p.stateT < 0.18) || (p.state === PSTATE.INTERACT && p.stateT < INTERACT_LOCK);
     // movement
     let mx = cmd.move[0], my = cmd.move[1]; const ml = len(mx, my); if (ml > 1) { mx /= ml; my /= ml; }
     const wantSprint = cmd.sprint && ml > 0 && !cmd.sneak;
@@ -320,7 +348,10 @@ export class SurvivalSim {
     p.health -= dmg; this.metrics.damageTaken += dmg;
     if (cause === 'zombie' && this.rand() < ZOMBIE.bleedChance) p.bleeding = true;
     this.emit(EV.PLAYER_HURT, { damage: dmg, from: from ? { x: from.x, y: from.y } : null, cause, health: Math.max(0, p.health), bleeding: p.bleeding, x: p.x, y: p.y });
+    // being hurt interrupts an interact lock (harvest/barricade/container): a zombie hit staggers (one stagger window,
+    // no added lock), any other cause drops straight back to locomotion so the player can move at once
     if (cause === 'zombie') { this.setPState(PSTATE.STAGGER); this.noise(p.x, p.y, NOISE.hurt, 'hurt'); }
+    else if (p.state === PSTATE.INTERACT) this.setPState(PSTATE.IDLE);
     if (p.health <= 0) { p.health = 0; p.alive = false; this.setPState(PSTATE.DEAD); this.emit(EV.PLAYER_DEATH, { cause, x: p.x, y: p.y }); this.lose(cause); }
   }
   // ---------------- zombies ----------------

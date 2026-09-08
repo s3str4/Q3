@@ -138,7 +138,7 @@ export class Renderer {
     }
     for (const [id, rig] of this.zombies) if (!live.has(id)) { rig.root.visible = false; this.pool.push(rig); this.zombies.delete(id); this.interp.delete(id); }
     // ---- town, effects, markers ----
-    this.town.update(dt, p.x, p.y);
+    this.town.update(dt, p.x, p.y, L.dark);
     this.effects.update(dt);
     this.effects.writeEntities(entities, L.dark);
     // ---- camera: smooth follow + hurt nudge ----

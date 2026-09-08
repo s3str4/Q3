@@ -7,9 +7,9 @@
 import { ITEMS, WEAPON_SLOTS, WEAPONS, PLAYER, DAY, BARRICADE_COST, ZSTATE, EV } from '../shared/survival/constants.js';
 
 const HINTS = {
-  supplies: 'fridge in the start house  (F eat, G drink)',
+  supplies: 'fridge in the start house · F eat, G drink',
   arm: 'closet in the start house: bat',
-  planks: 'trees around the map (E or swing), shelves',
+  planks: 'chop trees (E or swing) or loot shelves',
   fortify: 'stand next to a door/window, press B',
   survive: 'stay inside, fight at the barricades',
 };
@@ -129,7 +129,9 @@ export class Hud {
     this.text('threat-n', String(chasers.length)); this.text('ring-n', String(chasers.length));
     this.text('threat-l', chasers.length === 0 ? 'no threat' : chasers.length === 1 ? 'zombie chasing you' : 'zombies chasing you');
     this.cls(document.getElementById('threat'), 'hot', chasers.length > 0); this.cls(document.getElementById('threat-ring'), 'hot', chasers.length > 0);
+    this.cls(document.getElementById('threat-ring'), 'hidden', chasers.length === 0);   // the top-bar "0 · no threat" already says it; no lone "0"
     this.updateArrows(chasers, p);
+    this.wasBleeding = p.bleeding;   // events arrive before update(), so this is the pre-event state for the bandage toast
     // timed things
     this.updateToasts(now); this.updateFloaters(); if (this.bannerT && now > this.bannerT) { this.bannerT = 0; this.bannerEl.classList.remove('show', 'horde'); }
     if (this.hitT && now > this.hitT) { this.hitT = 0; this.hitEl.classList.remove('show'); }
@@ -159,21 +161,40 @@ export class Hud {
     let best = null, bd = 1e9; if (p.alive) for (const o of sim.world.openings.values()) { const d = Math.hypot(o.x + 0.5 - p.x, o.y + 0.5 - p.y); if (d < PLAYER.interactRange + 0.4 && d < bd) { bd = d; best = o; } }
     if (best) { const planks = p.inventory.plank || 0; b = best.barricade > 0 ? `${cap(best.kind)} barricaded (${Math.round(best.barricade)} hp)` : `Barricade ${best.kind} (${BARRICADE_COST} planks, have ${planks})`; bOk = best.barricade <= 0 && planks >= BARRICADE_COST; }
     const pe = document.getElementById('prompt-e'), pb = document.getElementById('prompt-b');
-    this.set('pe', e || '', (t) => { pe.lastElementChild.textContent = t; pe.classList.toggle('hidden', !t); }); this.cls(pe, 'no', !eOk);
-    this.set('pb', b || '', (t) => { pb.lastElementChild.textContent = t; pb.classList.toggle('hidden', !t); }); this.cls(pb, 'no', !bOk);
+    // .no dims the row and appends "(unavailable)" unless the text already carries its own reason (.self)
+    const selfExplains = (t) => /\(|barricaded|broken/.test(t || '');
+    this.set('pe', e || '', (t) => { pe.lastElementChild.textContent = t; pe.classList.toggle('hidden', !t); }); this.cls(pe, 'no', !eOk); this.cls(pe, 'self', selfExplains(e));
+    this.set('pb', b || '', (t) => { pb.lastElementChild.textContent = t; pb.classList.toggle('hidden', !t); }); this.cls(pb, 'no', !bOk); this.cls(pb, 'self', selfExplains(b));
     const on = !!(e || b); this.cls(this.promptEl, 'hidden', !on);
     if (on) { const [sx, sy] = this.toScreen(p.x, p.y, 0); const x = Math.round(Math.max(160, Math.min(innerWidth - 160, sx))), y = Math.round(Math.min(innerHeight - 190, sy + 64)); this.set('ppos', x + ',' + y, () => { this.promptEl.style.transform = `translate(${x}px, ${y}px) translateX(-50%)`; }); }
   }
-  // off-screen chasers: skull arrows clamped to the viewport edge, rotated toward the zombie
+  // off-screen chasers: skull arrows on a compass ellipse (semi-axes 0.40 W x 0.34 H) around the player's screen position
+  // (7DTD-style ring), kept inside the viewport and walked inward off the HUD panels (hotbar, vitals, toasts, objective,
+  // top bar, perf); arrows whose centres would sit within 40 px of each other fan out along the ring; each rotates toward
+  // its zombie. Panel rects are re-measured every 300 ms (they only move on resize / show-hide).
   updateArrows(chasers, p) {
-    let n = 0; const [px, py] = this.toScreen(p.x, p.y, 0); const M = 28;
+    let n = 0; const [px, py] = this.toScreen(p.x, p.y, 0); const M = 28, W = innerWidth, H = innerHeight, R = 44;   // R: rotated 60 px box + pointer tip
+    if (!this.rects || this.now - (this.rectT || 0) > 300) { this.rectT = this.now; this.rects = ['hotbar', 'vitals', 'toasts', 'objective', 'topbar', 'perf'].map((id) => document.getElementById(id)).filter((el) => el && !el.classList.contains('hidden')).map((el) => el.getBoundingClientRect()).filter((r) => r.width > 0 && r.height > 0); }
+    const rx = 0.40 * W, ry = 0.34 * H;
+    const hits = (x, y) => this.rects.some((r) => x + R > r.left && x - R < r.right && y + R > r.top && y - R < r.bottom);
+    const place = (ang) => {
+      const c = Math.cos(ang), s = Math.sin(ang);
+      let t = 1 / Math.sqrt((c / rx) ** 2 + (s / ry) ** 2);   // ray from the player's screen position to the ellipse
+      if (c > 0) t = Math.min(t, (W - M - px) / c); if (c < 0) t = Math.min(t, (M - px) / c); if (s > 0) t = Math.min(t, (H - M - py) / s); if (s < 0) t = Math.min(t, (M - py) / s);
+      for (let i = 0; i < 14 && t > 48 && hits(px + c * t, py + s * t); i++) t -= 24;   // walk inward until clear of every panel
+      return [px + c * t, py + s * t];
+    };
+    const placed = [];
     for (const z of chasers) {
       if (n >= this.arrows.length) break; const [sx, sy] = this.toScreen(z.x, z.y, 0);
-      if (sx > M && sx < innerWidth - M && sy > M && sy < innerHeight - M) continue;   // on screen: the renderer's "!" marker covers it
-      const dx = sx - px, dy = sy - py; const ang = Math.atan2(dy, dx);
-      // clamp along the ray from the player's screen position to the viewport border
-      let t = 1e9; if (dx > 0) t = Math.min(t, (innerWidth - M - px) / dx); if (dx < 0) t = Math.min(t, (M - px) / dx); if (dy > 0) t = Math.min(t, (innerHeight - M - py) / dy); if (dy < 0) t = Math.min(t, (M - py) / dy);
-      const ax = Math.round(px + dx * t), ay = Math.round(py + dy * t); const a = this.arrows[n++];
+      if (sx > M && sx < W - M && sy > M && sy < H - M) continue;   // on screen: the renderer's "!" marker covers it
+      const ang = Math.atan2(sy - py, sx - px); let pos = place(ang);
+      for (let k = 1; k <= 10; k++) {   // fan out: alternate +/- steps of ~44 px of arc around the original bearing
+        if (!placed.some((q) => Math.hypot(q[0] - pos[0], q[1] - pos[1]) < 40)) break;
+        const da = 44 / Math.max(60, Math.hypot(pos[0] - px, pos[1] - py)); pos = place(ang + (k % 2 ? 1 : -1) * Math.ceil(k / 2) * da);
+      }
+      placed.push(pos);
+      const ax = Math.round(pos[0]), ay = Math.round(pos[1]); const a = this.arrows[n++];
       const key = ax + ',' + ay + ',' + Math.round(ang * 20); if (a.key !== key) { a.key = key; a.el.style.transform = `translate(${ax}px, ${ay}px) translate(-50%,-50%) rotate(${(ang * 180 / Math.PI).toFixed(0)}deg)`; }
       if (!a.shown) { a.shown = true; a.el.classList.remove('hidden'); }
     }
@@ -184,10 +205,10 @@ export class Hud {
     const last = this.toasts[this.toasts.length - 1];
     if (item && last && last.item === item && this.now < last.until) { last.count += item.count; last.el.textContent = `+${last.count} ${item.label}`; last.until = this.now + 2500; return; }
     const el = document.createElement('div'); el.className = 'toast ' + cls; el.textContent = text; this.toastsEl.appendChild(el);
-    this.toasts.push({ el, until: this.now + 2500, item: item ? item.label : null, count: item ? item.count : 0, label: item ? item.label : '' });
+    this.toasts.push({ el, until: this.now + (cls === 'dim' ? 1200 : 2500), item: item ? item.label : null, count: item ? item.count : 0, label: item ? item.label : '' });   // dim (door, equip) toasts are short-lived
     if (this.toasts.length > 7) { const t = this.toasts.shift(); t.el.remove(); }
   }
-  updateToasts(now) { while (this.toasts.length && now > this.toasts[0].until) this.toasts.shift().el.remove(); }
+  updateToasts(now) { if (this.toasts.some((t) => now > t.until)) this.toasts = this.toasts.filter((t) => now <= t.until || (t.el.remove(), false)); }   // per-toast lifetimes, not FIFO
   banner(main, sub = '', cls = '', ms = 2400) {
     document.getElementById('banner-main').textContent = main; document.getElementById('banner-sub').textContent = sub;
     this.bannerEl.className = 'show ' + cls; void this.bannerEl.offsetWidth; this.bannerT = this.now + ms;
@@ -228,7 +249,7 @@ export class Hud {
       case EV.LOW_HEALTH: if (e.on) this.banner('LOW HEALTH', 'eat, drink and bandage to recover', 'warn', 1800); break;
       case EV.EAT: this.toast(`Ate ${ITEMS[e.item].label.toLowerCase()} · hunger ${Math.round(e.hunger)}`, 'ok'); break;
       case EV.DRINK: this.toast(`Drank ${ITEMS[e.item].label.toLowerCase()} · thirst ${Math.round(e.thirst)}`, 'ok'); break;
-      case EV.BANDAGE: this.toast('Bandaged · bleeding stopped', 'ok'); break;
+      case EV.BANDAGE: this.toast(`Bandaged · ${this.wasBleeding ? 'bleeding stopped · ' : ''}+${ITEMS.bandage.heal} hp over ${PLAYER.bandageHealTime} s`, 'ok'); break;
       case EV.RELOAD: this.toast('Reloading...', 'dim'); break;
       case EV.RELOAD_DONE: this.toast(`Reloaded (${e.mag} rounds)`, 'ok'); break;
       case EV.WEAPON_SWITCH: this.toast(`Equipped ${ITEMS[e.weapon].label.toLowerCase()}`, 'dim'); break;
@@ -252,7 +273,9 @@ export class Hud {
     if (this.ended) return; this.ended = true; const m = sim.metrics;
     document.getElementById('end-title').textContent = won ? 'YOU SURVIVED THE NIGHT' : 'YOU DIED';
     document.getElementById('end-cause').textContent = won ? `Dawn of day ${sim.day}, ${sim.clock()}` : `${CAUSE[cause] || cap(String(cause))} · day ${sim.day}, ${sim.clock()}`;
-    const secs = Math.round(m.survivedSeconds || sim.t); const rows = [['Kills', m.kills], ['Damage taken', Math.round(m.damageTaken)], ['Barricades built', m.barricadesBuilt], ['Items looted', m.itemsLooted], ['Time survived', `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')} real · day ${sim.day} ${sim.clock()}`]];
+    // game hours come from the in-game clock (sim.t is real seconds at timeScale 1, so it is not game time); wall time from sim.t
+    const startH = sim.opts.startHour ?? DAY.startHour, gameH = Math.max(0, (sim.day - 1) * 24 + sim.hour - startH), secs = Math.round(m.survivedSeconds || sim.t);
+    const rows = [['Kills', m.kills], ['Damage taken', Math.round(m.damageTaken)], ['Barricades built', m.barricadesBuilt], ['Items looted', m.itemsLooted], ['Time survived', `${fmtHm(gameH)} game time (${String(startH).padStart(2, '0')}:00 day 1 to ${sim.clock()} day ${sim.day}) · ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')} real`]];
     document.getElementById('end-metrics').innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('');
     this.endEl.className = 'overlay ' + (won ? 'won' : 'lost'); this.modal();
   }

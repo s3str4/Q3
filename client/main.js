@@ -30,6 +30,24 @@ $('btn-practice').onclick = () => start({ kind: 'ws', url: $('server').value.tri
 $('btn-host').onclick = () => start({ kind: 'host' });
 $('btn-join').onclick = () => start({ kind: 'join', code: $('p2p-code').value });
 const params = new URLSearchParams(location.search);
+// Static hosting (e.g. GitHub Pages): no game server behind the page. Detect it once and put the P2P flow forward.
+const servedByGameServer = fetch('info', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+servedByGameServer.then((info) => {
+  if (info) return;
+  document.querySelector('details').open = true;
+  $('server').placeholder = 'ws://host:27960 (needs a running server)';
+  if (!settings.server) $('server').value = '';
+  status('static page: use Direct P2P (invite link) or enter a server address');
+});
+// Invite links: ?join=<invite code> pre-fills the code and starts the guest flow automatically.
+const joinCode = params.get('join');
+if (joinCode) { document.querySelector('details').open = true; $('p2p-code').value = joinCode; setTimeout(() => start({ kind: 'join', code: joinCode }), 100); }
+const copyText = async (text, btn) => {
+  try { await navigator.clipboard.writeText(text); const t = btn.textContent; btn.textContent = 'COPIED'; setTimeout(() => (btn.textContent = t), 1200); }
+  catch { $('p2p-code').select(); document.execCommand && document.execCommand('copy'); }
+};
+$('btn-copy-code').onclick = () => copyText($('p2p-code').value, $('btn-copy-code'));
+$('btn-copy-link').onclick = () => copyText(location.origin + location.pathname + '?join=' + encodeURIComponent($('p2p-code').value), $('btn-copy-link'));
 if (params.get('auto')) setTimeout(() => start({ kind: 'ws', url: params.get('server') || defaultServer(), bot: params.get('bot') === '1', name: params.get('name') }), 100);
 
 function defaultServer() { return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`; }
@@ -46,6 +64,7 @@ async function start(mode) {
       transport = new WsTransport(normalizeWs(mode.url));
       await transport.connect();
       // ask the server which map it runs
+      if (!mode.url) throw new Error('no server address: enter ws://host:27960 or use Direct P2P');
       const info = await fetch(mode.url.replace(/^ws/, 'http').replace(/\/$/, '') + '/info').then((r) => r.json()).catch(() => null);
       if (info) { mapName = info.map; gameMode = info.mode; }
     } else if (mode.kind === 'host') {
@@ -54,15 +73,16 @@ async function start(mode) {
       transport = host.localLink();
       $('p2p-status').textContent = 'creating invite code...';
       const code = await host.invite();
-      $('p2p-code').value = code; $('p2p-status').textContent = 'Send this invite code to your opponent, then paste their answer code here and click JOIN WITH CODE.';
+      $('p2p-code').value = code; $('btn-copy-link').classList.remove('hidden'); $('btn-copy-code').classList.remove('hidden');
+      $('p2p-status').textContent = 'Send the invite LINK (or the code) to your opponent, then paste their answer code here and click JOIN WITH CODE.';
       $('btn-join').onclick = async () => { try { await host.acceptAnswer($('p2p-code').value); $('p2p-status').textContent = 'connecting peer...'; } catch (e) { $('p2p-status').textContent = 'bad answer code'; } };
       transport.onmessage = null;
     } else if (mode.kind === 'join') {
       const rtc = new RtcTransport();
       $('p2p-status').textContent = 'creating answer code...';
       const ans = await rtc.answer(mode.code);
-      $('p2p-code').value = ans; $('p2p-status').textContent = 'Send this answer code back to the host. Waiting for connection...';
-      await new Promise((res, rej) => { rtc.onopen = res; setTimeout(() => rej(new Error('P2P connection timed out (both sides behind symmetric NAT?)')), 30000); });
+      $('p2p-code').value = ans; $('btn-copy-code').classList.remove('hidden'); $('btn-copy-link').classList.add('hidden'); $('p2p-status').textContent = 'Send this answer code back to the host. Waiting for connection...';
+      await new Promise((res, rej) => { rtc.onopen = res; setTimeout(() => rej(new Error('P2P connection timed out after 5 minutes (host did not accept the answer, or both sides are behind symmetric NAT)')), 300000); });
       transport = rtc;
     }
     const map = await loadMap(mapName);

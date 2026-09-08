@@ -3,14 +3,20 @@
 // errors, frame p99 <= 16.7 ms and draw calls <= 150 (skipped with a message when there is no GPU or the renderer is
 // still the stub), cue/event alignment within 1 tick for every event type not declared silent (reported, not
 // asserted, while the audio engine is the stub), objective progress >= 2 steps, screenshot saved to
-// .evidence/survival/client_test/shot.png. Skips entirely when no Chromium/Edge binary is installed.
+// .evidence/survival/client_test/shot.png. Skips entirely when no Chromium/Edge binary is installed. Port from
+// SURVIVAL_TEST_PORT (default 27993).
+// Also the headless autopilot behaviour tests behind the evidence runs: no 'arrived but out of reach' stall (no idle
+// window >= 3 s while a stage is unfinished, seeds 1/7/10/11/16 at timeScale 4) and the reckless control hides in the
+// start house (door shut, no barricade) until 21:30, then walks out and dies at night.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createServer } from '../server/index.mjs';
+import { autopilotIdleWindows, ticks } from './helpers_survival.mjs';
+import { DAY } from '../shared/survival/constants.js';
 
-const PORT = 27993, FAST = 8, RUN_SECONDS = 25;
+const PORT = +(process.env.SURVIVAL_TEST_PORT || 27993), FAST = 8, RUN_SECONDS = 25;
 const EDGE = ['C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Google/Chrome/Application/chrome.exe'].find((p) => fs.existsSync(p));
 const outDir = path.resolve('.evidence', 'survival', 'client_test');
 
@@ -72,3 +78,22 @@ function cueAlignment(events, audioLog, silent) {
   const noCue = Object.entries(types).filter(([k, v]) => v.cues.size === 0 && !silent.has(k)).map(([k]) => k);
   return { types, noCue, maxDelay, worst };
 }
+
+// ---------------- autopilot behaviour (headless sim) ----------------
+const STALL_S = 3;
+for (const seed of [1, 7, 10, 11, 16]) test(`autopilot 'win' seed ${seed} at timeScale 4 never idles >= ${STALL_S} s with a stage unfinished`, () => {
+  const { sim, windows } = autopilotIdleWindows(seed, 'win', 4, ticks(STALL_S));
+  assert.equal(sim.result, 'won', `result ${sim.result} at ${sim.clock()} day ${sim.day}`);
+  assert.deepEqual(windows, [], 'idle windows (ticks, stage, position): ' + JSON.stringify(windows));
+});
+test("autopilot 'reckless' seed 7: hides in the start house until 21:30 (door shut, no barricade), then dies on the road at night", () => {
+  const { sim, ap } = autopilotIdleWindows(7, 'reckless', 4, 1e9);
+  assert.equal(sim.result, 'lost'); assert.equal(sim.metrics.barricadesBuilt, 0); assert.equal(sim.player.alive, false);
+  const out = ap.stages.find((s) => s.stage === 'road_night' || s.stage === 'road');
+  assert.ok(out && out.hour >= 21.5 && out.hour < 22, 'left the house at 21:30: ' + JSON.stringify(ap.stages));
+  assert.ok(ap.stages[0].stage === 'hide' && ap.stages.slice(0, ap.stages.indexOf(out)).every((s) => s.stage === 'hide'), 'hid all day: ' + JSON.stringify(ap.stages));
+  assert.ok(sim.day === 2 || sim.hour >= DAY.nightHour, 'died after 21:00 day 1: ' + sim.clock() + ' day ' + sim.day);
+  const doors = sim.log.filter((l) => l.kind === 'door');                       // the player's own door toggles
+  assert.ok(doors.every((l) => l.hour >= 21.5), 'door untouched until 21:30: ' + JSON.stringify(doors.slice(0, 3)));
+  assert.ok(sim.log.every((l) => !(l.kind === 'player.state' && l.to === 'attack')), 'never swung');
+});

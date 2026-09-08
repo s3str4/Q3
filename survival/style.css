@@ -56,7 +56,7 @@ kbd { display: inline-block; font-family: var(--num); font-size: 14px; font-weig
 #threat.hot { color: #fff; border-color: var(--red); animation: threat 0.8s ease-in-out infinite; }
 @keyframes threat { 50% { box-shadow: 0 0 16px rgba(255,60,50,0.8); background: rgba(120, 18, 10, 0.85); } }
 /* ---------- objective tracker (top-left) ---------- */
-#objective { position: absolute; left: 18px; top: 18px; width: 330px; padding: 10px 14px 8px; }
+#objective { position: absolute; left: 18px; top: 18px; width: 370px; padding: 10px 14px 8px; }
 #obj-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
 #obj-list li { display: flex; gap: 10px; align-items: flex-start; padding: 4px 6px; border-radius: 4px; opacity: 0.62; }
 #obj-list li.current { opacity: 1; background: rgba(157,184,90,0.16); outline: 1px solid rgba(157,184,90,0.45); }
@@ -95,6 +95,7 @@ li.current .box::after { content: ""; position: absolute; inset: 3px; background
 .prow { display: flex; align-items: center; gap: 10px; font-size: 16px; font-weight: 600; }
 .prow.no { color: var(--ink-dim); } .prow.no kbd { opacity: 0.5; }
 .prow.no span::after { content: "  (unavailable)"; font-size: 14px; font-weight: 400; }
+.prow.no.self span::after { content: none; }   /* the text already says why (barricaded, broken, (empty), (need N planks)) */
 /* ---------- feedback ---------- */
 #vignette { position: absolute; inset: 0; background: radial-gradient(ellipse at center, rgba(255,0,0,0) 40%, rgba(255,24,24,0.65) 100%); opacity: 0; }
 #vignette.flash { animation: vflash 500ms ease-out; }

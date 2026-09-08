@@ -23,6 +23,15 @@ export const CEILING = 0.95;
 export const MAX_VOICES = 56;
 export const LIMITER = { threshold: -3, knee: 0, ratio: 20, attack: 0.001, release: 0.1 };
 export const BUS_LEVELS = { player: 1, world: 1, zombies: 1, ui: 1, ambient: 1 };
+// Pan softening: the equal-power panner is blended with a mono (L+R)/2 fold of its own output, so a source at 90 deg
+// azimuth still reaches the far ear at 0.225 vs 0.775 in the near ear (-10.7 dB) instead of -inf (headphones: no dead ear).
+export const PAN_BLEND = 0.45;
+// End-of-match duck: world / zombies / player buses fall to -14 dB over DUCK_TIME s under the WIN/LOSE fanfare
+// (on LOSE the player bus waits DUCK_LOSE_HOLD s so the death exhale + thud are heard first).
+export const DUCK_GAIN = 0.2, DUCK_TIME = 0.5, DUCK_LOSE_HOLD = 1.3;
+// Horde tension bed: lowpass cutoff 200 -> 900 Hz over 40 s; every later HORDE wave re-opens it +TENSION_WAVE_HZ over 2 s
+// and the cap rises by the same amount, the tremolo speeds up 1 Hz per wave.
+export const TENSION_WAVE_HZ = 150;
 export const AMBIENT_XFADE = 3;               // s, bed crossfade on phase change
 export const TRIGGER_LOG_MAX = 5000;
 // Event types deliberately voiced by nothing. NOISE is an AI diagnostic (every audible noise already has its own cue);
@@ -32,18 +41,18 @@ export const SILENT = new Set([EV.NOISE, EV.ZOMBIE_LOST]);
 
 // Linear gain per cue (calibrated: see tools/survival_audio_measure.mjs --calibrate).
 export const CUE_TRIM = {
-  footstepGrass: 0.28, footstepAsphalt: 0.195, footstepConcrete: 0.159, footstepWood: 0.131, zombieStep: 0.149,
-  swingFists: 0.237, swingBat: 0.443, meleeHitFists: 0.263, meleeHitBat: 0.261, zombieDeath: 0.43, gunshot: 0.43, bulletHitWorld: 0.17, bulletHitFlesh: 0.317,
-  reload: 0.288, reloadDone: 0.231, noAmmo: 0.248,
-  groanIdle: 0.672, groanChase: 0.806, zombieAlert: 0.747, zombieAttack: 0.809, zombieBash: 0.246, zombieStagger: 0.444,
-  barricadeHit: 0.233, barricadeBroken: 0.377, doorBreak: 0.377, windowBreak: 0.233,
-  playerHurt: 0.581, heartbeat: 0.206, playerDeath: 0.554, staminaOut: 0.229,
-  pickupMetal: 0.246, pickupPaper: 0.322, pickupWood: 0.184, pickupGlass: 0.224, pickupTin: 0.232,
-  containerFridge: 0.214, containerCabinet: 0.328, containerShelf: 0.176, containerLocker: 0.349, containerWreck: 0.559,
-  doorOpen: 0.202, doorClose: 0.181, harvestHit: 0.205, harvestDone: 0.344, barricadeBuilt: 0.233, eat: 0.379, drink: 0.196, bandage: 0.182,
-  weaponSwitch: 0.254, actionDenied: 0.417, objectiveStep: 0.353, objectiveComplete: 0.479,
-  phaseDusk: 0.223, phaseNight: 0.26, phaseDawn: 0.22, phaseDay: 0.184, hordeHorn: 0.471, tension: 0.051, win: 0.399, lose: 0.449,
-  ambientDay: 0.111, ambientDusk: 0.046, ambientNight: 0.046,
+  footstepGrass: 0.28, footstepAsphalt: 0.241, footstepConcrete: 0.097, footstepWood: 0.131, zombieStep: 0.211,
+  swingFists: 0.237, swingBat: 0.443, meleeHitFists: 0.372, meleeHitBat: 0.361, zombieDeath: 0.607, gunshot: 0.41, bulletHitWorld: 0.24, bulletHitFlesh: 0.448,
+  reload: 0.288, reloadDone: 0.23, noAmmo: 0.248,
+  groanIdle: 0.95, groanChase: 1.14, zombieAlert: 1.055, zombieAttack: 1.145, zombieBash: 0.348, zombieStagger: 0.628,
+  barricadeHit: 0.328, barricadeBroken: 0.517, doorBreak: 0.517, windowBreak: 0.281,
+  playerHurt: 0.58, heartbeat: 0.206, playerDeath: 0.553, staminaOut: 0.23,
+  pickupMetal: 0.247, pickupPaper: 0.322, pickupWood: 0.184, pickupGlass: 0.224, pickupTin: 0.232,
+  containerFridge: 0.303, containerCabinet: 0.463, containerShelf: 0.249, containerLocker: 0.494, containerWreck: 0.79,
+  doorOpen: 0.286, doorClose: 0.257, harvestHit: 0.285, harvestDone: 0.486, barricadeBuilt: 0.33, eat: 0.379, drink: 0.196, bandage: 0.182,
+  weaponSwitch: 0.254, actionDenied: 0.417, objectiveStep: 0.353, objectiveComplete: 0.48,
+  phaseDusk: 0.223, phaseNight: 0.256, phaseDawn: 0.219, phaseDay: 0.184, hordeHorn: 0.47, tension: 0.051, win: 0.399, lose: 0.45,
+  ambientDay: 0.112, ambientDusk: 0.046, ambientNight: 0.046,
 };
 const T = CUE_TRIM;
 // Gait scaling for footsteps: sneak is ~-12 dB under walk, run +4 dB. Zombie steps: shamble quiet drag, chase heavier.
@@ -60,7 +69,7 @@ export class AudioEngine {
     this.counters = { created: 0, killed: 0, spatial: 0, far: 0 };
     this.triggerLog = []; this.ambientState = 'none'; this.listenerPos = [0, 0]; this.cameraYaw = 0;
     this.ambientSched = null;                                  // { phase, next: ctx time of the next sparse ambient event }
-    this.hordeAlive = false;
+    this.hordeAlive = false; this.hordeWave = 0; this.ducked = false;
     const seed = this.opts.seed;
     this.rand = seed === undefined ? Math.random : (() => { let s = (seed >>> 0) || 1; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; })();
     this.cues = this.buildCueTable();
@@ -98,7 +107,8 @@ export class AudioEngine {
   now() { return this.ctx.currentTime; }
   stats() {
     let oldest = 0; if (this.ctx) for (const v of this.voices) if (!v.loop) oldest = Math.max(oldest, this.ctx.currentTime - v.born);
-    return { state: this.ctx ? this.ctx.state : 'none', voices: this.voices.size, loops: this.loops.size, loopNames: [...this.loops.keys()], oldest: +oldest.toFixed(2), created: this.counters.created, killed: this.counters.killed, spatial: this.counters.spatial, far: this.counters.far, ambient: this.ambientState, reduction: this.limiter ? this.limiter.reduction : 0 };
+    const tension = this.loops.get('tension');
+    return { state: this.ctx ? this.ctx.state : 'none', voices: this.voices.size, loops: this.loops.size, loopNames: [...this.loops.keys()], oldest: +oldest.toFixed(2), created: this.counters.created, killed: this.counters.killed, spatial: this.counters.spatial, far: this.counters.far, ambient: this.ambientState, reduction: this.limiter ? this.limiter.reduction : 0, ducked: this.ducked, hordeWave: this.hordeWave, tensionHz: tension ? Math.round(tension.f.frequency.value) : null };
   }
   makeNoise(seconds) {
     const n = Math.floor(this.ctx.sampleRate * seconds); const b = this.ctx.createBuffer(1, n, this.ctx.sampleRate); const d = b.getChannelData(0);
@@ -125,7 +135,11 @@ export class AudioEngine {
     const v = { in: g, panner: null, end: 0, pending: 0, loop: !!o.loop, dead: false, born: ctx.currentTime, bus };
     if (spatial) {
       const p = ctx.createPanner(); p.panningModel = PANNING_MODEL; p.distanceModel = 'inverse'; p.refDistance = o.ref ?? REF_DIST; p.maxDistance = o.maxDist ?? MAX_DIST; p.rolloffFactor = o.rolloff ?? ROLLOFF;
-      g.connect(p); p.connect(this.bus[bus]); v.panner = p; this.place(v, origin, false); this.counters.spatial++;
+      g.connect(p); v.panner = p; this.place(v, origin, false); this.counters.spatial++;
+      // panner (stereo, 1 - PAN_BLEND) + mono fold of the panner output (PAN_BLEND) -> bus: keeps the far ear alive
+      const wet = ctx.createGain(); wet.gain.value = 1 - PAN_BLEND; p.connect(wet); wet.connect(this.bus[bus]);
+      const mono = ctx.createGain(); mono.gain.value = PAN_BLEND; mono.channelCount = 1; mono.channelCountMode = 'explicit'; mono.channelInterpretation = 'speakers'; p.connect(mono); mono.connect(this.bus[bus]);
+      v.pan = [wet, mono];
     } else g.connect(this.bus[bus]);
     this.voices.add(v); this.counters.created++;
     if (this.voices.size > MAX_VOICES) { let oldest = null; for (const x of this.voices) if (!x.loop && (!oldest || x.born < oldest.born)) oldest = x; if (oldest) this.kill(oldest); }
@@ -136,7 +150,15 @@ export class AudioEngine {
     if (p.positionX) { if (smooth) { p.positionX.setTargetAtTime(origin[0], t, 0.03); p.positionZ.setTargetAtTime(origin[1], t, 0.03); } else { p.positionX.setValueAtTime(origin[0], t); p.positionY.setValueAtTime(0, t); p.positionZ.setValueAtTime(origin[1], t); } }
     else p.setPosition(origin[0], 0, origin[1]);
   }
-  kill(v) { if (v.dead) return; v.dead = true; try { v.in.disconnect(); if (v.panner) v.panner.disconnect(); } catch {} this.voices.delete(v); this.counters.killed++; }
+  kill(v) { if (v.dead) return; v.dead = true; try { v.in.disconnect(); if (v.panner) v.panner.disconnect(); if (v.pan) for (const n of v.pan) n.disconnect(); } catch {} this.voices.delete(v); this.counters.killed++; }
+  // WIN/LOSE: world / zombies / player buses to DUCK_GAIN over DUCK_TIME s (the fanfare on the ui bus stays); duck(false) restores them.
+  duck(on, lose = false) {
+    if (!this.bus || this.ducked === on) return; this.ducked = on; const t = this.now();
+    for (const b of ['world', 'zombies', 'player']) {
+      const p = this.bus[b].gain; const t0 = on && lose && b === 'player' ? t + DUCK_LOSE_HOLD : t;
+      p.cancelScheduledValues(t); p.setValueAtTime(p.value, t); if (t0 > t) p.setValueAtTime(p.value, t0); p.linearRampToValueAtTime(BUS_LEVELS[b] * (on ? DUCK_GAIN : 1), t0 + DUCK_TIME);
+    }
+  }
   track(v, node, t1) { v.pending++; v.end = Math.max(v.end, t1); node.onended = () => { v.pending--; if (!v.loop && v.pending <= 0) this.kill(v); }; return node; }
   // Saturation stage (thumps, blasts): sources connect to the returned node.
   drive(v, amount = 2, level = 1) {
@@ -204,11 +226,15 @@ export class AudioEngine {
       this.osc(v, 'sine', 150 + r * 40, t, t + 0.09, { f1: 75, peak: 0.9, attack: 0.001, dest: d }); // hollow
       this.noise(v, t, t + 0.03, { type: 'bandpass', freq: 1200, q: 1.5, peak: 0.6, attack: 0.001 });
       this.osc(v, 'triangle', 420 + r * 60, t, t + 0.04, { peak: 0.3, attack: 0.001 });
-    } else { // asphalt / concrete: hard tap, concrete slightly brighter
-      const bright = surface === 'concrete' ? 1.25 : 1;
-      this.noise(v, t, t + 0.018, { type: 'bandpass', freq: (2800 + r * 1200) * bright, q: 1.5, peak: 1, attack: 0.0006, hold: 0.003 });
-      this.noise(v, t, t + 0.035, { type: 'bandpass', freq: 1400 * bright, q: 1, peak: 0.45, attack: 0.001 });
-      this.osc(v, 'sine', 170 + r * 40, t, t + 0.04, { f1: 80, peak: 0.3, attack: 0.001 });
+    } else if (surface === 'concrete') { // hard, short tap: 2.4 kHz click + bright grain, almost no body (~30 ms)
+      this.osc(v, 'sine', 2400, t, t + 0.014, { peak: 0.9, attack: 0.0005 });
+      this.noise(v, t, t + 0.012, { type: 'bandpass', freq: 2400 + r * 300, q: 6, peak: 1, attack: 0.0004, hold: 0.002 });
+      this.noise(v, t, t + 0.022, { type: 'highpass', freq: 3200, peak: 0.5, attack: 0.0004 });
+      this.osc(v, 'sine', 240 + r * 40, t, t + 0.028, { f1: 120, peak: 0.18, attack: 0.001 });
+    } else { // asphalt: duller, slightly gritty step (~90 ms): lowpassed thud + a gravel scuff of 3 short grains
+      this.noise(v, t, t + 0.05, { type: 'lowpass', freq: 900, freqEnd: 250, q: 0.9, peak: 1, attack: 0.002, hold: 0.004 });
+      this.osc(v, 'sine', 160 + r * 40, t, t + 0.06, { f1: 70, peak: 0.55, attack: 0.001 });
+      for (const [dt, d] of [[0.012, 0.014], [0.034, 0.012], [0.058, 0.03]]) this.noise(v, t + dt, t + dt + d, { type: 'bandpass', freq: 1100 + this.rand() * 500, q: 1.2, peak: 0.35, attack: 0.001 }); // grit
     }
     return v;
   }
@@ -438,14 +464,26 @@ export class AudioEngine {
   tensionStart() { // rising bed while horde zombies are alive: two detuned low saws, a slow filter rise, a pulsing 6 Hz tremolo
     if (this.loops.has('tension')) return this.loops.get('tension').v;
     const ctx = this.ctx, t = this.now(); const v = this.voice('ambient', null, { gain: T.tension, loop: true });
+    const wave = Math.max(0, this.hordeWave - 1);               // later waves start (and cap) higher even when the bed restarts
     const g = ctx.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(1, t + 2); g.connect(v.in);
-    const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.setValueAtTime(200, t); f.frequency.linearRampToValueAtTime(900, t + 40); f.Q.value = 2; f.connect(g);
+    const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.setValueAtTime(200 + wave * TENSION_WAVE_HZ, t); f.frequency.linearRampToValueAtTime(900 + wave * TENSION_WAVE_HZ, t + 40); f.Q.value = 3; f.connect(g);
     const nodes = [];
     for (const [fq, d] of [[55, 0], [82.4, 7]]) { const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = fq; o.detune.value = d; o.connect(f); nodes.push(o); }
-    const trem = ctx.createOscillator(); trem.frequency.value = 6; const tg = ctx.createGain(); tg.gain.value = 0.3; trem.connect(tg); tg.connect(g.gain); nodes.push(trem);
+    // upper layer (165 Hz saw, 3rd harmonic): silent on wave 1, +0.6 per later wave, so each wave thickens the bed as well as opening it
+    const hi = ctx.createOscillator(); hi.type = 'sawtooth'; hi.frequency.value = 164.8; hi.detune.value = -4; const hg = ctx.createGain(); hg.gain.value = Math.min(1, 0.6 * wave); hi.connect(hg); hg.connect(f); nodes.push(hi);
+    const trem = ctx.createOscillator(); trem.frequency.value = 6 + wave; const tg = ctx.createGain(); tg.gain.value = 0.3; trem.connect(tg); tg.connect(g.gain); nodes.push(trem);
     for (const n of nodes) { n.start(t); this.track(v, n, Infinity); }
-    const l = { v, stop: () => { const t2 = this.now(); g.gain.cancelScheduledValues(t2); g.gain.setValueAtTime(g.gain.value, t2); g.gain.linearRampToValueAtTime(0, t2 + 1.5); for (const n of nodes) n.stop(t2 + 1.6); v.loop = false; v.end = t2 + 1.6; } };
+    const l = { v, f, trem, hg, wave, cap: 900 + wave * TENSION_WAVE_HZ, stop: () => { const t2 = this.now(); g.gain.cancelScheduledValues(t2); g.gain.setValueAtTime(g.gain.value, t2); g.gain.linearRampToValueAtTime(0, t2 + 1.5); for (const n of nodes) n.stop(t2 + 1.6); v.loop = false; v.end = t2 + 1.6; } };
     this.loops.set('tension', l); return v;
+  }
+  // Next horde wave while the bed is running: re-open the cutoff +TENSION_WAVE_HZ over 2 s, raise the cap, faster tremolo.
+  tensionEscalate() {
+    const l = this.loops.get('tension'); if (!l) return this.tensionStart();
+    const t = this.now(); const p = l.f.frequency; const cur = p.value; l.wave++; l.cap += TENSION_WAVE_HZ;
+    p.cancelScheduledValues(t); p.setValueAtTime(cur, t); p.linearRampToValueAtTime(Math.min(l.cap, cur + TENSION_WAVE_HZ), t + 2); p.linearRampToValueAtTime(l.cap, t + 40);
+    l.trem.frequency.setTargetAtTime(6 + l.wave, t, 0.5);
+    l.hg.gain.cancelScheduledValues(t); l.hg.gain.setValueAtTime(l.hg.gain.value, t); l.hg.gain.linearRampToValueAtTime(Math.min(1, 0.6 * l.wave), t + 2);
+    return l.v;
   }
   fanfare(win) {
     const v = this.voice('ui', null, { gain: win ? T.win : T.lose }); const t = this.now();
@@ -582,11 +620,11 @@ export class AudioEngine {
       case EV.WEAPON_SWITCH: this.weaponSwitch(); cue = 'weaponSwitch'; break;
       case EV.ACTION_DENIED: this.actionDenied(); cue = 'actionDenied'; break;
       case EV.PHASE: this.phaseSting(e.phase); this.setAmbient(e.phase); cue = 'phase' + e.phase[0].toUpperCase() + e.phase.slice(1); break;
-      case EV.HORDE: this.hordeHorn(); this.tensionStart(); cue = 'hordeHorn'; break;
+      case EV.HORDE: this.hordeHorn(); this.hordeWave++; if (this.loops.has('tension')) this.tensionEscalate(); else this.tensionStart(); cue = 'hordeHorn'; break;
       case EV.OBJECTIVE_STEP: this.objectiveStep(); cue = 'objectiveStep'; break;
       case EV.OBJECTIVE_COMPLETE: this.objectiveComplete(); cue = 'objectiveComplete'; break;
-      case EV.WIN: this.stopLoop('tension'); this.fanfare(true); cue = 'win'; break;
-      case EV.LOSE: this.stopLoop('tension'); this.fanfare(false); cue = 'lose'; break;
+      case EV.WIN: this.stopLoop('tension'); this.stopLoop('heartbeat'); this.duck(true); this.fanfare(true); cue = 'win'; break;
+      case EV.LOSE: this.stopLoop('tension'); this.stopLoop('heartbeat'); this.duck(true, true); this.fanfare(false); cue = 'lose'; break;
       default: if (!SILENT.has(e.type)) console.warn('[audio] unmapped event', e.type); return;
     }
     this.log(cue, e);
@@ -603,6 +641,8 @@ export class AudioEngine {
       if (horde && !this.hordeAlive && !this.loops.has('tension') && !sim.result) this.tensionStart();
       if (!horde && this.hordeAlive) this.stopLoop('tension');
       this.hordeAlive = horde;
+      if (this.ducked && !sim.result) { this.duck(false); this.hordeWave = 0; }   // match restarted in place
+      if (sim.result && !this.ducked) this.duck(true, sim.result === 'lost');       // result reached without a WIN/LOSE event through event()
     }
     const hb = this.loops.get('heartbeat'); if (hb) this.scheduleHeartbeat(hb);
     this.stepAmbient();

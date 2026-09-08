@@ -7,7 +7,8 @@
 //                 side windows, then hold at bat range from the last open window until 06:00. Sneaks near idle
 //                 zombies, fights chasers with the bat (backing off between swings), shoots only with 2+ chasers,
 //                 bandages when bleeding, eats/drinks under 45 (regen needs 40).
-// mode 'reckless' walks the road, sprints when it can, never fights or fortifies: a control run that must die.
+// mode 'reckless' hides in the start house by day (door closed, nothing barricaded, nothing fought), steps out at 21:30
+//                 and sprints the road: a control run that demonstrates an unfortified night and must die.
 //
 // Navigation: Dijkstra over walkable tiles (closed doors count as walkable and are opened with `interact` when the
 // next waypoint is a door; windows never), tiles near zombies cost extra, string-pulled so open ground is crossed
@@ -22,6 +23,10 @@ const N4 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 const BAT_REACH = WEAPONS.bat.range + ZOMBIE.radius - 0.05;     // swing when a zombie centre is inside this
 const HOME_HOUR = 18.5;                                           // abandon errands and walk home after this hour
 const HOLD_PLANKS = 6;                                            // door + 2 windows
+// interact/build gate: the sim accepts interactRange (+0.5 slack) but goto() reports 'arrived' anywhere on a
+// 4-neighbour tile, whose far corner is 1.58 from the target centre; below this the autopilot closes in instead
+const REACH = PLAYER.interactRange - 0.05;
+const RECKLESS_OUT_HOUR = 21.5;                                   // reckless: leave the house at 21:30
 
 export class Autopilot {
   constructor(sim, opts = {}) {
@@ -31,7 +36,7 @@ export class Autopilot {
     this.stage = null; this.stages = [];    // stage log: { stage, tick, hour } (evidence)
     this.holdSpot = null; this.treeGoal = null; this.stuckT = 0; this.lastPos = null;
     this.decisions = 0;
-    this.setStage(this.mode === 'reckless' ? 'road' : 'loot_home');
+    this.setStage(this.mode === 'reckless' ? 'hide' : 'loot_home');
   }
   setStage(s) { if (s === this.stage) return; this.stage = s; this.stages.push({ stage: s, tick: this.sim.tick, hour: +this.sim.hour.toFixed(2) }); }
   // ---------------- world queries ----------------
@@ -115,6 +120,22 @@ export class Autopilot {
   // edge-triggered buttons: high for one tick, then forced low for one tick
   pulse(cmd, name) { if (!this.last[name]) cmd[name] = true; }
   faceAndUse(cmd, x, y, name) { cmd.move = [0, 0]; cmd.aim = [x, y]; this.pulse(cmd, name); }
+  // Walk to a 4-neighbour of tile (x, y) and, once there, close in on the tile centre until it is within REACH.
+  // Returns 'reach' (use the button now) | 'moving' | 'door' | 'lost'.
+  approach(cmd, x, y, opts = {}) {
+    const p = this.sim.player; const cx = x + 0.5, cy = y + 0.5; const d = len(cx - p.x, cy - p.y);
+    if (d <= REACH) return 'reach';
+    const r = this.goto(cmd, opts.goals || this.around(x, y), opts);
+    if (r !== 'arrived') return r;
+    cmd.move = [(cx - p.x) / d, (cy - p.y) / d]; cmd.aim = [cx, cy]; return 'moving';   // on the tile, but a corner away
+  }
+  // Stand on the floor tile inside the home door (centred, never in the doorway) and press `button` on the door.
+  doorStep(cmd, door, button) {
+    const p = this.sim.player; const inDoorway = Math.floor(p.x) === door.x && Math.floor(p.y) === door.y;
+    const at = this.goto(cmd, [[door.x, door.y - 1]], { centre: true });
+    if (at !== 'arrived' && (inDoorway || len(door.x + 0.5 - p.x, door.y + 0.5 - p.y) > REACH)) return true;
+    this.faceAndUse(cmd, door.x + 0.5, door.y + 0.5, button); return true;
+  }
   // ---------------- per-tick ----------------
   command(sim) {
     this.sim = sim; const cmd = emptyCmd(); const p = sim.player;
@@ -126,10 +147,19 @@ export class Autopilot {
     this.last = cmd; return cmd;
   }
   reckless(cmd) {
-    const sim = this.sim, p = sim.player;
-    // patrol the east-west road; sprint whenever there is stamina; never fight, never build
+    const sim = this.sim, p = sim.player; const door = this.homeDoor();
+    // by day: sit in the start house with the door shut (no barricade, no weapon) until 21:30
+    if (sim.day === 1 && sim.hour < RECKLESS_OUT_HOUR) {
+      this.setStage('hide');
+      if (!this.insideHome(p.x, p.y)) { this.goto(cmd, [[door.x, door.y - 1]], { avoid: false }); return; }
+      if (door.open && door.barricade <= 0 && door.hp > 0) { this.doorStep(cmd, door, 'interact'); return; }
+      const spot = [Math.floor(sim.world.spawn.x), Math.floor(sim.world.spawn.y)];
+      if (this.goto(cmd, [spot], { centre: true }) === 'arrived') { cmd.move = [0, 0]; cmd.aim = [door.x + 0.5, door.y + 0.5]; }
+      return;
+    }
+    // 21:30: open the door, patrol the east-west road; sprint whenever there is stamina; never fight, never build
     if (!this.patrolDir) this.patrolDir = 1;
-    if (Math.floor(p.y) < 22 || Math.floor(p.y) > 25) { const r = this.goto(cmd, [[Math.max(2, Math.min(45, Math.floor(p.x))), 23]], { avoid: false }); if (r !== 'lost') { cmd.sprint = p.stamina > 30; return; } }
+    if (Math.floor(p.y) < 22 || Math.floor(p.y) > 25) { const r = this.goto(cmd, [[Math.max(2, Math.min(45, Math.floor(p.x))), 23]], { avoid: false }); this.setStage(sim.phase === 'night' ? 'road_night' : 'road'); if (r !== 'lost') { cmd.sprint = r === 'moving' && p.stamina > 30 && !p.tired; return; } }
     if (p.x > 44) this.patrolDir = -1; else if (p.x < 3) this.patrolDir = 1;
     cmd.move = [this.patrolDir, (23.5 - p.y) * 0.5]; cmd.aim = [p.x + this.patrolDir * 3, 23.5]; cmd.sprint = p.stamina > 30 && !p.tired;
     this.setStage(sim.phase === 'night' ? 'road_night' : 'road');
@@ -229,24 +259,24 @@ export class Autopilot {
   lootAll(cmd, list) {
     for (const [kind, x, y] of list) {
       const c = this.container(kind, x, y); if (!c || c.opened) continue;
-      const p = this.sim.player; const d = len(x + 0.5 - p.x, y + 0.5 - p.y);
-      if (d < 1.5) { this.faceAndUse(cmd, x + 0.5, y + 0.5, 'interact'); return true; }
-      const r = this.goto(cmd, this.around(x, y)); if (r === 'lost') { c.opened = true; continue; }  // unreachable: skip
+      const r = this.approach(cmd, x, y);
+      if (r === 'reach') { this.faceAndUse(cmd, x + 0.5, y + 0.5, 'interact'); return true; }
+      if (r === 'lost') { c.opened = true; continue; }  // unreachable: skip
       return true;
     }
     return false;
   }
   // chop the nearest reachable tree; true while busy
   chop(cmd) {
-    const sim = this.sim, w = sim.world, p = sim.player;
+    const sim = this.sim, w = sim.world;
     if (!this.treeGoal || !w.trees.has(key(this.treeGoal[0], this.treeGoal[1]))) {
       const f = this.field(true); let best = null, bd = 1e9;
       for (const k of w.trees.keys()) { const [x, y] = k.split(',').map(Number); for (const [ax, ay] of this.around(x, y)) { const d = f.dist[ay * w.w + ax]; if (d < bd) { bd = d; best = [x, y]; } } }
       if (!best) return false; this.treeGoal = best;
     }
-    const [tx, ty] = this.treeGoal; const d = len(tx + 0.5 - p.x, ty + 0.5 - p.y);
-    if (d < 1.4) { this.faceAndUse(cmd, tx + 0.5, ty + 0.5, 'interact'); return true; }
-    const r = this.goto(cmd, this.around(tx, ty)); if (r === 'lost') { this.treeGoal = null; }
+    const [tx, ty] = this.treeGoal; const r = this.approach(cmd, tx, ty);
+    if (r === 'reach') { this.faceAndUse(cmd, tx + 0.5, ty + 0.5, 'interact'); return true; }
+    if (r === 'lost') this.treeGoal = null;
     return true;
   }
   goHome(cmd) {
@@ -258,15 +288,12 @@ export class Autopilot {
   // close the door, barricade door then windows (nearest opening within reach is the one built): true while busy
   fortify(cmd) {
     const sim = this.sim, p = sim.player; const door = this.homeDoor();
-    if (door.open && door.barricade <= 0) {
-      const at = this.goto(cmd, [[door.x, door.y - 1]], { centre: true }); if (at !== 'arrived') return true;
-      this.faceAndUse(cmd, door.x + 0.5, door.y + 0.5, 'interact'); return true;
-    }
+    if (door.open && door.barricade <= 0) return this.doorStep(cmd, door, 'interact');
     if (p.inventory.plank >= BARRICADE_COST) {
       const order = [door, ...this.homeOpenings().filter((o) => o.kind === 'window').sort((a, b) => a.x - b.x)];   // door, west window (8,11), north (10,8), east (15,11)
       for (const o of order) {
         if (o.barricade > 0) continue;
-        if (o === door) { if (this.inventoryPlanks() < BARRICADE_COST) break; const at = this.goto(cmd, [[door.x, door.y - 1]], { centre: true }); if (at !== 'arrived') return true; this.faceAndUse(cmd, door.x + 0.5, door.y + 0.5, 'build'); return true; }
+        if (o === door) { if (this.inventoryPlanks() < BARRICADE_COST) break; return this.doorStep(cmd, door, 'build'); }
         // stand on the interior tile next to the window, the nearest opening from there is that window
         const spot = this.interiorNeighbour(o); if (!spot) continue;
         const at = this.goto(cmd, [spot], { centre: true }); if (at !== 'arrived') return true;

@@ -64,13 +64,13 @@ await page.evaluate(() => {
     const sr = 48000, seconds = spec.seconds || 2.5;
     const ctx = new OfflineAudioContext(2, Math.ceil(sr * seconds), sr);
     const eng = new mod.AudioEngine({ context: ctx, ambient: !!spec.ambient, limiter: spec.limiter !== false, seed: 7 });
-    eng.init(); eng.setVolume(1);
+    eng.init(); eng.setVolume(1); eng.setCameraYaw(spec.cameraYaw || 0);   // renderer yaw: screen-up = (-cos yaw, -sin yaw) in sim x/y
     const sim = { player: { x: 0, y: 0, facing: 0 }, phase: spec.phase || 'day', zombies: [], result: null };
     // Chrome's DynamicsCompressor starts with its gain ramped down for ~0.2 s: trigger at T0 so cues measure like a running context.
     const T0 = spec.t0 ?? 0.25; const checks = {};
     const Q = 128; const sched = new Map(); const at = (t, fn) => { const k = Math.floor(t * sr / Q); if (!sched.has(k)) sched.set(k, []); sched.get(k).push(fn); };
     at(T0, () => { for (const c of spec.cues || []) eng.cue(c.name, { origin: c.origin, gait: c.gait, health: c.health }); });
-    for (const fr of spec.frames || []) at(T0 + (fr.at || 0), () => { for (const e of fr.events || []) eng.event(e, sim); eng.update(sim, 0); });
+    for (const fr of spec.frames || []) at(T0 + (fr.at || 0), () => { if (fr.result !== undefined) sim.result = fr.result; for (const e of fr.events || []) eng.event(e, sim); eng.update(sim, 0); });   // fr.result mirrors sim.result ('won' / 'lost') as the real sim sets it with WIN / LOSE
     // a 60 fps update() clock like the client's (keeps heartbeat / ambient events scheduled ahead, collects voices)
     for (let t = 0.05; T0 + t < seconds - 0.1; t += 1 / 60) at(T0 + t, () => eng.update(sim, 1 / 60));
     if (spec.stopAt) at(T0 + spec.stopAt, () => { for (const k of [...eng.loops.keys()]) eng.stopLoop(k); checks.loopsAfterStop = eng.loops.size; });
@@ -79,7 +79,9 @@ await page.evaluate(() => {
     const buf = await ctx.startRendering();
     const L = buf.getChannelData(0), R = buf.getChannelData(1); const n = L.length; const thr = Math.pow(10, -60 / 20);
     let peakL = 0, peakR = 0, first = -1, last = -1;
-    for (let i = 0; i < n; i++) { const a = Math.abs(L[i]), b = Math.abs(R[i]); if (a > peakL) peakL = a; if (b > peakR) peakR = b; if (a > thr || b > thr) { if (first < 0) first = i; last = i; } }
+    // spec.window [a, b] (s after T0) restricts peak / extent / centroid analysis to that stretch (e.g. after a fanfare)
+    const i0 = spec.window ? Math.max(0, Math.floor((T0 + spec.window[0]) * sr)) : 0, i1 = spec.window ? Math.min(n, Math.floor((T0 + spec.window[1]) * sr)) : n;
+    for (let i = i0; i < i1; i++) { const a = Math.abs(L[i]), b = Math.abs(R[i]); if (a > peakL) peakL = a; if (b > peakR) peakR = b; if (a > thr || b > thr) { if (first < 0) first = i; last = i; } }
     const w0 = spec.rmsWindow ? Math.floor(spec.rmsWindow[0] * sr) : Math.max(0, first), w1 = spec.rmsWindow ? Math.floor(spec.rmsWindow[1] * sr) : last + 1;
     let sq = 0; for (let i = w0; i < w1; i++) sq += (L[i] * L[i] + R[i] * R[i]) / 2;
     const rms = w1 > w0 ? Math.sqrt(sq / (w1 - w0)) : 0;
@@ -133,9 +135,33 @@ if (!only) {
   console.log(`distance ${DIST_CHECK.name}: ` + DIST_CHECK.dists.map((x) => `${x} tiles ${d[x]} dBFS`).join(', '));
   if (!(d[3] > d[10] && d[10] > d[20])) fail('distance attenuation not monotonic');
   if (d[20] < DIST_CHECK.minAt20) fail(`groan at 20 tiles ${d[20]} dBFS < ${DIST_CHECK.minAt20}`);
-  const pan = await render({ cues: [{ name: 'groanIdle', origin: [-3, 0] }] }); const panR = await render({ cues: [{ name: 'groanIdle', origin: [3, 0] }] });
-  console.log(`panning: west groan L/R ${pan.peakL}/${pan.peakR}, east groan L/R ${panR.peakL}/${panR.peakR}`);
+  // panning in screen terms. cameraYaw 0: screen-up = -x, screen-right = -y, so [0, 3] is screen-left and [0, -3] screen-right
+  // (90 deg azimuth): the near ear leads by >= 3 dB and the far ear stays within 12 dB (softened equal-power pan, no dead ear).
+  const pan = await render({ cues: [{ name: 'groanIdle', origin: [0, 3] }] }); const panR = await render({ cues: [{ name: 'groanIdle', origin: [0, -3] }] });
+  console.log(`panning (yaw 0): screen-left groan L/R ${pan.peakL}/${pan.peakR}, screen-right groan L/R ${panR.peakL}/${panR.peakR}`);
   if (!(pan.peakL > pan.peakR + 3 && panR.peakR > panR.peakL + 3)) fail('groans are not panned by side');
+  if (pan.peakR < pan.peakL - 12 || panR.peakL < panR.peakR - 12) fail(`far ear more than 12 dB under the near ear (L/R ${pan.peakL}/${pan.peakR}, ${panR.peakL}/${panR.peakR})`);
+  // the game camera: yaw PI/4 -> screen-up = (-0.707, -0.707); a groan straight up the screen is centred, screen-left is left-heavy
+  const yaw = Math.PI / 4; const up = await render({ cues: [{ name: 'groanIdle', origin: [-2.12, -2.12] }], cameraYaw: yaw }); const left = await render({ cues: [{ name: 'groanIdle', origin: [-2.12, 2.12] }], cameraYaw: yaw });
+  console.log(`panning (yaw PI/4): screen-up groan L/R ${up.peakL}/${up.peakR}, screen-left groan L/R ${left.peakL}/${left.peakR}`);
+  if (Math.abs(up.peakL - up.peakR) > 1) fail(`screen-up groan not centred at camera yaw PI/4 (L/R ${up.peakL}/${up.peakR})`);
+  if (!(left.peakL > left.peakR + 3)) fail(`screen-left groan not left-heavy at camera yaw PI/4 (L/R ${left.peakL}/${left.peakR})`);
+  // WIN/LOSE duck: a chase groan 2.2 s after WIN (fanfare over) sits >= 12 dB under the same groan in a live match; tension + heartbeat loops stop
+  const groanRef = await render({ frames: [{ at: 2.2, events: [{ type: EV.ZOMBIE_GROAN, state: 'chase', tick: 60, t: 2, x: 3, y: 0 }] }], seconds: 4, window: [2.2, 3.5] });
+  const groanWin = await render({ frames: [{ at: 0, events: [{ type: EV.LOW_HEALTH, on: true, tick: 1, t: 0 }, { type: EV.HORDE, tick: 1, t: 0, x: 0, y: 0, wave: 0, count: 6 }] }, { at: 0.5, result: 'won', events: [{ type: EV.WIN, tick: 15, t: 0.5, x: 0, y: 0 }] }, { at: 2.2, events: [{ type: EV.ZOMBIE_GROAN, state: 'chase', tick: 60, t: 2, x: 3, y: 0 }] }], seconds: 4, window: [2.2, 3.5] });
+  console.log(`duck after WIN: groanChase ${groanRef.peak} -> ${groanWin.peak} dBFS (${(groanWin.peak - groanRef.peak).toFixed(1)} dB), loops after WIN ${JSON.stringify(groanWin.checks.afterGc.loopNames)}, ducked ${groanWin.checks.afterGc.ducked}`);
+  if (!(groanWin.peak <= groanRef.peak - 12)) fail(`world/zombie buses not ducked after WIN (${groanRef.peak} -> ${groanWin.peak} dBFS)`);
+  if (groanWin.checks.afterGc.loops !== 0) fail('tension / heartbeat loops still running after WIN');
+  // concrete vs asphalt steps must be distinguishable blind: centroid >= 400 Hz apart, duration >= 20 ms apart
+  const fc = rows.find((r) => r.cue === 'footstepConcrete'), fa = rows.find((r) => r.cue === 'footstepAsphalt');
+  if (fc && fa) { console.log(`footsteps: concrete centroid ${fc.centroid} Hz / ${fc.duration} s vs asphalt ${fa.centroid} Hz / ${fa.duration} s`); if (!(fc.centroid - fa.centroid >= 400)) fail(`concrete not >= 400 Hz brighter than asphalt (${fc.centroid} vs ${fa.centroid})`); if (!(Math.abs(fc.duration - fa.duration) >= 0.02)) fail(`concrete / asphalt durations too alike (${fc.duration} vs ${fa.duration})`); }
+  // tension escalation: a second HORDE wave at 2.5 s re-opens the bed's filter (+150 Hz over 2 s): centroid over 5-6 s rises vs a single wave
+  const hordeEv = (t, wave) => ({ type: EV.HORDE, tick: Math.round(t * 30), t, x: 0, y: 0, wave, count: 5 });
+  const wave1 = await render({ frames: [{ at: 0, events: [hordeEv(0, 0)] }], seconds: 6.5, window: [5, 6], checkAt: 6.4 });
+  const wave2 = await render({ frames: [{ at: 0, events: [hordeEv(0, 0)] }, { at: 2.5, events: [hordeEv(2.5, 1)] }], seconds: 6.5, window: [5, 6], checkAt: 6.4 });
+  console.log(`tension escalation: 1 wave centroid ${wave1.centroid} Hz (cutoff ${wave1.checks.afterGc.tensionHz} Hz) vs 2 waves ${wave2.centroid} Hz (cutoff ${wave2.checks.afterGc.tensionHz} Hz, hordeWave ${wave2.checks.afterGc.hordeWave})`);
+  if (!(wave2.checks.afterGc.tensionHz >= wave1.checks.afterGc.tensionHz + 100)) fail(`tension cutoff did not re-open on wave 2 (${wave1.checks.afterGc.tensionHz} -> ${wave2.checks.afterGc.tensionHz} Hz)`);
+  if (!(wave2.centroid >= wave1.centroid + 20)) fail(`tension bed not audibly brighter on wave 2 (centroid ${wave1.centroid} -> ${wave2.centroid} Hz)`);
   // heartbeat stops on LOW_HEALTH off and on death; tension stops when the last horde zombie dies
   const hb = await render({ frames: [{ at: 0, events: [{ type: EV.LOW_HEALTH, on: true, tick: 1, t: 0 }] }, { at: 1.0, events: [{ type: EV.LOW_HEALTH, on: false, tick: 30, t: 1 }] }], seconds: 2.5 });
   const hbDeath = await render({ frames: [{ at: 0, events: [{ type: EV.LOW_HEALTH, on: true, tick: 1, t: 0 }] }, { at: 1.0, events: [{ type: EV.PLAYER_DEATH, tick: 30, t: 1, x: 0, y: 0 }] }], seconds: 3.5 });

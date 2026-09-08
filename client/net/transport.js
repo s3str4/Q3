@@ -22,11 +22,19 @@ export class WsTransport {
 // ---- WebRTC P2P with copy/paste signaling (no server at all) ----
 const RTC_CONFIG = { iceServers: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }] };
 
+// Wait for ICE gathering. The code we exchange must carry a public (server-reflexive) candidate or two peers behind
+// different NATs can never connect, so keep waiting (up to 8 s) until STUN has answered or gathering completes.
 function waitIce(pc) {
   return new Promise((resolve) => {
     if (pc.iceGatheringState === 'complete') return resolve();
-    const t = setTimeout(resolve, 2500);
-    pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') { clearTimeout(t); resolve(); } };
+    let haveSrflx = false;
+    const done = () => { clearTimeout(hard); clearTimeout(soft); resolve(); };
+    const hard = setTimeout(done, 8000);
+    let soft = null;
+    pc.addEventListener('icecandidate', (e) => {
+      if (e.candidate && /typ srflx/.test(e.candidate.candidate) && !haveSrflx) { haveSrflx = true; soft = setTimeout(done, 400); } // a little grace for more candidates
+    });
+    pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') done(); };
   });
 }
 const b64 = (o) => btoa(unescape(encodeURIComponent(JSON.stringify(o))));

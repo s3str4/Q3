@@ -3,10 +3,10 @@
 // the reckless control). Whole file runs in a few seconds.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { SurvivalSim } from '../shared/survival/sim.js';
+import { SurvivalSim, INTERACT_LOCK } from '../shared/survival/sim.js';
 import { Autopilot } from '../shared/survival/autopilot.js';
 import { World } from '../shared/survival/world.js';
-import { PLAYER, ZOMBIE, WEAPONS, DAY, EV, PSTATE, ZSTATE, OBJECTIVES, ITEMS, NOISE, DOOR_HP, BARRICADE_HP, BARRICADE_COST, TREE_HITS, TREE_PLANKS, TICK_RATE } from '../shared/survival/constants.js';
+import { PLAYER, ZOMBIE, WEAPONS, DAY, EV, PSTATE, ZSTATE, OBJECTIVES, ITEMS, NOISE, DOOR_HP, BARRICADE_HP, BARRICADE_COST, TREE_HITS, TREE_PLANKS, TICK_RATE, DT } from '../shared/survival/constants.js';
 import { makeSim, run, cmd, byType, placePlayer, spawnZombie, ticks } from './helpers_survival.mjs';
 
 const near = (a, b, tol, msg) => assert.ok(Math.abs(a - b) <= tol, `${msg}: ${a} vs ${b} (tol ${tol})`);
@@ -231,4 +231,47 @@ test('player state machine only visits known states; attack/interact/stagger exp
 test('autopilot is deterministic: same seed, same log', () => {
   const a = autopilotRun(11, 'win', 8), b = autopilotRun(11, 'win', 8);
   assert.equal(a.sim.tick, b.sim.tick); assert.deepEqual(a.sim.summary(), b.sim.summary()); assert.deepEqual(a.sim.log.length, b.sim.log.length);
+});
+
+// ---------------- correction 3: doorway wall slide, hurt cancels interact ----------------
+test('doorway: walking at an open 1-tile door up to 0.45 off-centre funnels through within 2 s (wall slide)', () => {
+  for (const x of [12.67, 12.95, 12.05]) {
+    const sim = makeSim(); sim.world.opening(12, 14).open = true; placePlayer(sim, x, 13.3, Math.PI / 2);
+    let passT = null;
+    for (let i = 0; i < ticks(2) && passT == null; i++) { sim.step(cmd({ move: [0, 1] })); if (sim.player.y > 15) passT = sim.t; }
+    assert.ok(passT != null && passT <= 2, `start x=${x}: through door (12,14) at ${passT} s (ended at ${sim.player.x.toFixed(2)},${sim.player.y.toFixed(2)})`);
+    near(sim.player.x, 12.5, 0.2, `funnelled toward the door centre from x=${x}`);
+  }
+  // a closed door still stops the player: the slide never opens a way that is not there
+  const shut = makeSim(); placePlayer(shut, 12.67, 13.3, Math.PI / 2); run(shut, ticks(1), cmd({ move: [0, 1] }));
+  assert.ok(shut.player.y < 14, 'closed door blocks: y=' + shut.player.y.toFixed(2));
+  // deterministic: two identical runs end on the same coordinates
+  const a = makeSim(), b = makeSim(); for (const s of [a, b]) { s.world.opening(12, 14).open = true; placePlayer(s, 12.9, 13.3, Math.PI / 2); run(s, ticks(1.5), cmd({ move: [0, 1] })); }
+  assert.deepEqual([a.player.x, a.player.y], [b.player.x, b.player.y]);
+});
+
+test('interact lock is 0.18 s and a hit cancels it: chopping under attack is never a longer damage window', () => {
+  assert.equal(INTERACT_LOCK, 0.18);
+  // harvest lock expires after 0.18 s: the player is walking again on the next tick
+  const sim = makeSim(); const w = sim.world; const [tk] = [...w.trees.keys()]; const [tx, ty] = tk.split(',').map(Number);
+  const nb = [[tx - 1, ty], [tx + 1, ty], [tx, ty - 1], [tx, ty + 1]].find(([x, y]) => !w.blocksPlayer(x, y));
+  placePlayer(sim, nb[0] + 0.5, nb[1] + 0.5, Math.atan2(ty - nb[1], tx - nb[0]));
+  run(sim, 1, cmd({ interact: true, aim: [tx + 0.5, ty + 0.5] })); assert.equal(sim.player.state, PSTATE.INTERACT);
+  const away = [-(tx - nb[0]), -(ty - nb[1])];
+  run(sim, ticks(INTERACT_LOCK) - 1, cmd({ move: away })); assert.equal(sim.player.state, PSTATE.INTERACT, 'still locked one tick before expiry');
+  run(sim, 2, cmd({ move: away })); assert.equal(sim.player.state, PSTATE.WALK, 'walking right after the lock');
+  // a zombie hit during the lock: INTERACT -> STAGGER on the hurt tick, exactly one PLAYER_HURT, moving again after hurtStagger
+  const s2 = makeSim(); placePlayer(s2, 24.5, 24.5, 0); s2.world.trees.set(s2.world.key(25, 24), 3); s2.world.set(25, 24, 6 /* TREE */);
+  const z = spawnZombie(s2, 24.5, 23.2, ZSTATE.ATTACK); z.attackT = 0; z.attackWind = 3 * DT;   // mid-swing: lands on tick 3, inside the 0.18 s lock
+  const ev = run(s2, 1, cmd({ interact: true, aim: [25.5, 24.5] })); assert.equal(byType(ev, EV.HARVEST_HIT).length, 1); assert.equal(s2.player.state, PSTATE.INTERACT);
+  let hurtTick = null, hurts = 0;
+  for (let i = 0; i < ticks(1.5) && hurtTick == null; i++) { const e = s2.step(cmd({ interact: true, aim: [25.5, 24.5], move: [-1, 0] })); hurts += byType(e, EV.PLAYER_HURT).length; if (hurts) hurtTick = s2.tick; }
+  assert.ok(hurtTick != null, 'the zombie landed a hit'); assert.equal(hurts, 1, 'one hurt event'); assert.equal(s2.player.state, PSTATE.STAGGER, 'hit interrupts INTERACT');
+  const tr = s2.log.filter((l) => l.kind === 'player.state'); const last = tr[tr.length - 1]; assert.equal(last.from, PSTATE.INTERACT); assert.equal(last.to, PSTATE.STAGGER);
+  run(s2, ticks(PLAYER.hurtStagger) + 1, cmd({ move: [-1, 0] })); assert.ok(s2.player.state === PSTATE.WALK || s2.player.state === PSTATE.STAGGER && s2.player.stateT >= PLAYER.hurtStagger, 'free after the stagger: ' + s2.player.state);
+  assert.ok(s2.player.moving, 'moving away after the stagger window');
+  // a non-zombie hurt (bleeding) during a barricade lock drops straight back to locomotion
+  const s3 = makeSim(); placePlayer(s3, 12.5, 12.6, Math.PI / 2); s3.player.inventory.plank = 2; s3.player.bleeding = true; s3.player.bleedT = PLAYER.bleedInterval - 2 * DT;
+  run(s3, 1, cmd({ build: true })); assert.equal(s3.player.state, PSTATE.INTERACT);
+  const e3 = run(s3, 1, cmd()); assert.equal(byType(e3, EV.PLAYER_HURT).length, 1); assert.equal(s3.player.state, PSTATE.IDLE, 'bleed tick cancels the interact lock');
 });

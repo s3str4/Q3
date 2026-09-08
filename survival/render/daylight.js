@@ -14,9 +14,11 @@ const KEYS = [
   { h: 7,    sky: 0x9ab2cf, sun: 0xffd9b0, sunI: 1.1,  hSky: 0xa8c0de, hGround: 0x4a4a3a, hemiI: 0.55, fog: [14, 80], el: 16, lantern: 0.15 },
   { h: 9,    sky: 0x8ec2f5, sun: 0xfff0d6, sunI: 1.7,  hSky: 0xbfe0ff, hGround: 0x66644a, hemiI: 0.62, fog: [12, 85], el: 38, lantern: 0 },
   { h: 12,   sky: 0x86bdf2, sun: 0xfff4e0, sunI: 1.9,  hSky: 0xc4e2ff, hGround: 0x6a6a4e, hemiI: 0.65, fog: [12, 88], el: 64, lantern: 0 },
-  { h: 16,   sky: 0x8cb8e6, sun: 0xffe8c4, sunI: 1.6,  hSky: 0xb8d6f4, hGround: 0x66604a, hemiI: 0.6,  fog: [12, 85], el: 36, lantern: 0 },
-  { h: 18,   sky: 0xd98a4a, sun: 0xffa050, sunI: 1.4,  hSky: 0xd08a5a, hGround: 0x5a4632, hemiI: 0.78, fog: [14, 80], el: 28, lantern: 0.15 },
-  { h: 19.5, sky: 0xb0502a, sun: 0xff7a30, sunI: 1.2,  hSky: 0xa85a3a, hGround: 0x4a3428, hemiI: 0.72, fog: [16, 76], el: 19, lantern: 0.5 },
+  // Dusk (7DTD red-sky warning window): 16:00-19:30 stays lit (sun elevation >= 42 deg, sunI >= 1.5 through 18:00)
+  // with a warm ground tint; the fall to night happens only between 19:30 and 21:00 (21:00 onward is unchanged).
+  { h: 16,   sky: 0x8cb8e6, sun: 0xffe8c4, sunI: 1.7,  hSky: 0xb8d6f4, hGround: 0x6a6048, hemiI: 0.62, fog: [12, 85], el: 46, lantern: 0 },
+  { h: 18,   sky: 0xe8ac6c, sun: 0xffc88a, sunI: 1.7,  hSky: 0xdeac7c, hGround: 0x866440, hemiI: 0.95, fog: [14, 82], el: 46, lantern: 0.1 },
+  { h: 19.5, sky: 0xc4623a, sun: 0xff9048, sunI: 1.5,  hSky: 0xbc6e48, hGround: 0x704a34, hemiI: 0.85, fog: [16, 78], el: 36, lantern: 0.4 },
   { h: 21,   sky: 0x101a3a, sun: 0x4a5aa0, sunI: 0.22, hSky: 0x243468, hGround: 0x0a0c14, hemiI: 0.4,  fog: [20, 72], el: 30, lantern: 1 },
   { h: 22.5, sky: 0x080d20, sun: 0x3a4a8a, sunI: 0.16, hSky: 0x1c2a58, hGround: 0x0a0c14, hemiI: 0.42, fog: [22, 70], el: 50, lantern: 1 },
   { h: 24,   sky: 0x070b1a, sun: 0x3a4a8a, sunI: 0.16, hSky: 0x1c2a58, hGround: 0x0a0c14, hemiI: 0.42, fog: [22, 70], el: 55, lantern: 1 },

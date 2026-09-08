@@ -107,7 +107,9 @@ export class TownView {
     const w = this.world; const keys = [...w.trees.keys()]; this.treeIndex = new Map(keys.map((k, i) => [k, i])); const n = Math.max(1, keys.length);
     const trunk = new THREE.InstancedMesh(colorAttr(new THREE.BoxGeometry(0.3, 1.3, 0.3).translate(0, 0.65, 0), 0x5a3d22), this.mat, n);
     const canopyGeo = mergeGeometries([colorAttr(new THREE.BoxGeometry(1.4, 1.2, 1.4).translate(0, 1.8, 0), 0x2f7a2a, 0x3f8f34), colorAttr(new THREE.BoxGeometry(0.9, 0.8, 0.9).translate(0, 2.8, 0), 0x2f7a2a, 0x3f8f34)]);
-    const canopy = new THREE.InstancedMesh(canopyGeo, new THREE.MeshLambertMaterial({ vertexColors: true }), n);
+    // canopy carries a faint warm-dark emissive fill at night (see update) so the unlit side faces stay attached to the
+    // sky-lit top faces instead of reading as floating green slabs against black
+    const canopy = new THREE.InstancedMesh(canopyGeo, new THREE.MeshLambertMaterial({ vertexColors: true, emissive: 0x1e2a1c, emissiveIntensity: 0 }), n);
     const stump = new THREE.InstancedMesh(colorAttr(new THREE.BoxGeometry(0.5, 0.35, 0.5).translate(0, 0.17, 0), 0x6a4a2a, 0x9a7a4a), this.mat, n);
     const zero = new THREE.Matrix4().makeScale(0, 0, 0); const col = new THREE.Color();
     keys.forEach((k, i) => {
@@ -146,7 +148,8 @@ export class TownView {
   // Structure the player is inside (walls included), or null.
   structureAt(x, y) { return this.world.structures.find((s) => x >= s.x0 && x < s.x1 + 1 && y >= s.y0 && y < s.y1 + 1) || null; }
   // Per-frame: cutaway lerp, door swing, glass/plank/lid/tree instance matrices from the sim world.
-  update(dt, playerX, playerY) {
+  update(dt, playerX, playerY, dark = 0) {
+    if (this.trees) this.trees.canopy.material.emissiveIntensity = Math.max(0, dark - 0.3) * 0.5;
     const inside = this.structureAt(playerX, playerY);
     for (const st of this.structures) {
       const want = inside === st.def ? 1 : 0; const cur = this.cut.get(st.def.name) ?? want; const k = 1 - Math.exp(-dt * 7);

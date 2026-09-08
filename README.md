@@ -97,6 +97,29 @@ The host runs the authoritative simulation in its browser tab (same code as the 
 and the guest has the peer-to-peer round-trip. Both sides use Google's public STUN servers to find their addresses;
 with two symmetric NATs the direct connection can fail (30 s timeout), in which case use one of the server options.
 
+## Static hosting (GitHub Pages): play from a link, no server
+
+The client can be hosted as plain static files, so your opponent only needs a link:
+
+```bash
+npm run build:static      # writes dist/ (client + shared sim + maps + the three.js files it uses, ~2 MB)
+npm run serve:static      # optional local preview of dist/ on http://localhost:8080 (no game server behind it)
+```
+
+GitHub Pages: push this repository to GitHub, then in the repository open Settings > Pages and set Source to
+"GitHub Actions". The workflow in `.github/workflows/pages.yml` builds `dist/` and deploys it on every push to
+`main`; the page is served at `https://<user>.github.io/<repo>/`.
+
+On a static page there is no game server, so the page opens the **Direct P2P** panel by itself:
+
+1. Host: click **HOST GAME**, then **COPY INVITE LINK** and send the link (it carries the invite code) to your opponent.
+2. Guest: opening the link starts the join automatically and shows an answer code; **COPY CODE** and send it back.
+3. Host: paste the answer code, click **JOIN WITH CODE**. Both arenas open; the host runs the simulation.
+
+The exchange can take up to 5 minutes before the guest's offer expires. Both sides use public STUN servers; if the
+direct connection fails (two symmetric NATs), fall back to a server (port forwarding or a tunnel, above). Any static
+host works the same way (Netlify, Cloudflare Pages, a plain web server) as long as it serves `dist/` over HTTPS.
+
 ## Controls
 
 | Action | Keys |
@@ -148,7 +171,7 @@ server/     index.mjs (HTTP static + WebSocket server, flags), netsim.mjs (laten
 client/     main.js, input.js, hud.js, net/ (clientgame.js prediction+interpolation, transport.js WebSocket/WebRTC,
             host.js browser P2P host, headless.js Node driver for tests), render/, audio/
 maps/       map modules (build(m) with the MapBuilder DSL); arena_duel.js is the competitive map
-tools/      bot_duel.mjs, netbench.mjs, evidence.mjs, screenshots.mjs, audio_measure.mjs
+tools/      bot_duel.mjs, netbench.mjs, evidence.mjs, screenshots.mjs, audio_measure.mjs, build_static.mjs
 tests/      node:test suites
 docs/       BENCHMARK.md (reference targets), NETWORKING.md, LEDGER.md (progress), AUDIO.md
 ```
