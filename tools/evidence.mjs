@@ -19,7 +19,7 @@ if (!EDGE) { console.error('no Chromium browser found'); process.exit(1); }
 const puppeteer = (await import('puppeteer-core')).default;
 
 const server = await createServer({ port, map: args.map || 'arena_duel', mode: args.mode || 'duel', bots: 1, quiet: true, latency: +(args.latency || 0), jitter: +(args.jitter || 0), loss: +(args.loss || 0), botSkill: +(args.skill || 0.6) });
-const browser = await puppeteer.launch({ executablePath: EDGE, headless: !args.headed, args: ['--use-angle=d3d11', '--enable-gpu-rasterization', '--ignore-gpu-blocklist', '--autoplay-policy=no-user-gesture-required', `--window-size=${W},${H}`, '--no-sandbox'] });
+const browser = await puppeteer.launch({ executablePath: EDGE, headless: !args.headed, args: ['--use-angle=d3d11', '--disable-frame-rate-limit', '--disable-gpu-vsync', '--enable-gpu-rasterization', '--ignore-gpu-blocklist', '--autoplay-policy=no-user-gesture-required', `--window-size=${W},${H}`, '--no-sandbox'] });
 const page = await browser.newPage();
 await page.setViewport({ width: W, height: H });
 const consoleErrors = [];

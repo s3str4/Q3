@@ -335,6 +335,7 @@ export class Game {
       return;
     }
     const pellets = wd.pellets || 1;
+    let impactSent = false; // Q3 has no per-pellet shotgun impact sound: one BULLET_IMPACT per blast
     for (let i = 0; i < pellets; i++) {
       let dir = av.forward;
       if (wd.spread) {
@@ -351,7 +352,7 @@ export class Game {
         if (w === WEAPONS.LIGHTNING) this.events.push({ type: EV.LG_HIT, id: p.id, origin: copy(tr.endpos) });
       } else if (tr.fraction < 1) {
         if (w === WEAPONS.LIGHTNING) this.events.push({ type: EV.LG_HIT, id: p.id, origin: copy(tr.endpos), world: true, normal: tr.plane ? copy(tr.plane.n) : [0, 0, 1] });
-        else this.events.push({ type: EV.BULLET_IMPACT, id: p.id, weapon: w, origin: copy(tr.endpos), normal: tr.plane ? copy(tr.plane.n) : [0, 0, 1] });
+        else if (!impactSent) { impactSent = true; this.events.push({ type: EV.BULLET_IMPACT, id: p.id, weapon: w, origin: copy(tr.endpos), normal: tr.plane ? copy(tr.plane.n) : [0, 0, 1], pellets: pellets }); }
       }
     }
   }

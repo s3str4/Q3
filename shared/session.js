@@ -32,6 +32,8 @@ export class GameSession {
     if (!this.clients.has(c.id)) return;
     this.clients.delete(c.id);
     if (c.joined) this.game.removePlayer(c.id);
+    // Q3 tourney semantics: when no human is left, the match is over; reset so the next player gets a fresh warmup
+    if (c.joined && ![...this.game.players.values()].some((p) => !p.isBot)) this.game.resetMatch();
     this.log(`client ${c.id} disconnected`);
     this.broadcastInfo();
   }

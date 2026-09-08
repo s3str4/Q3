@@ -88,7 +88,8 @@ playable thanks to lag compensation; see `docs/NETWORKING.md` for measurements.
 The browser can host the match itself over a WebRTC DataChannel; signaling is done by copying two short codes:
 
 1. Host: open the client page (any copy of it, e.g. a local `node server/index.mjs` on your own machine or a static
-   file host), open **Direct P2P**, click **HOST GAME**. An invite code appears; send it to your opponent (chat, email).
+   file host), open **Direct P2P**, click **HOST GAME**. The menu stays open with the invite code in the box; send it
+   to your opponent (chat, email). The arena opens automatically once the guest connects.
 2. Guest: paste the invite code into the box and click **JOIN WITH CODE**. An answer code appears; send it back.
 3. Host: paste the answer code and click **JOIN WITH CODE**. The connection opens and the match starts.
 
@@ -123,6 +124,8 @@ node --test "tests/*.test.mjs"                 # benchmark, gameplay rules, netc
 node tools/bot_duel.mjs --map arena_duel --seconds 180 --quiet    # headless bot-vs-bot duel report (frags, accuracy, liveliness)
 node tools/netbench.mjs                        # latency/jitter/loss table (prediction error, rates, bandwidth, tick cost)
 node tools/evidence.mjs --name run1 --port 27970 --seconds 20 [--latency 150 --jitter 30 --loss 2] [--headed]
+node tools/screenshots.mjs --map arena_duel --port 27973   # vantage/effect screenshots + tone and performance metrics into .evidence/screens/
+node tools/audio_measure.mjs --port 27974                  # offline render of every cue, loudness/attenuation rules, .evidence/audio/measure.json
 ```
 
 `tools/evidence.mjs` starts a server with a bot, drives a real headless Edge/Chrome through puppeteer-core with
@@ -145,7 +148,7 @@ server/     index.mjs (HTTP static + WebSocket server, flags), netsim.mjs (laten
 client/     main.js, input.js, hud.js, net/ (clientgame.js prediction+interpolation, transport.js WebSocket/WebRTC,
             host.js browser P2P host, headless.js Node driver for tests), render/, audio/
 maps/       map modules (build(m) with the MapBuilder DSL); arena_duel.js is the competitive map
-tools/      bot_duel.mjs, netbench.mjs, evidence.mjs
+tools/      bot_duel.mjs, netbench.mjs, evidence.mjs, screenshots.mjs, audio_measure.mjs
 tests/      node:test suites
 docs/       BENCHMARK.md (reference targets), NETWORKING.md, LEDGER.md (progress), AUDIO.md
 ```

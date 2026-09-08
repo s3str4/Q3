@@ -69,14 +69,22 @@ async function start(mode) {
     renderer = renderer || new Renderer(canvas);
     renderer.loadMap(map); renderer.setFov(settings.fov);
     hud.setMap(map);
-    cg = new ClientGame(map, transport, { mode: gameMode, name: settings.name, interpSnaps: settings.interp, onEvent: onEvent, onKick: (r) => stop('kicked: ' + r), onInfo: () => {} });
+    let hostWaiting = mode.kind === 'host';
+    cg = new ClientGame(map, transport, { mode: gameMode, name: settings.name, interpSnaps: settings.interp, onEvent: onEvent, onKick: (r) => stop('kicked: ' + r), onInfo: (info) => {
+      // P2P host: stay on the menu (the invite code is there) until the guest has joined, then enter the arena
+      if (hostWaiting && info.players && info.players.length >= 2) { hostWaiting = false; $('menu').classList.add('hidden'); $('p2p-status').textContent = 'peer connected'; if (!params.get('nolock')) input.lock(); audio.resume(); }
+    } });
     transport.onclose = () => stop('disconnected');
+    // Q3 shows the map only once the lightmap is loaded: wait for the vertex bake before joining so the countdown
+    // never plays over unbaked black faces
+    if (renderer.bakePromise) { status('baking lighting...'); await renderer.bakePromise; }
     cg.join(mode.bot ? { bot: true, botSkill: 0.6 } : {}); // ClientGame.join sends the protocol version and retries until WELCOME
     input = input || new Input(canvas, { sensitivity: settings.sens, requireLock: !params.get('nolock'), onEscape: () => { if (running) { $('menu').classList.remove('hidden'); status('paused - click CONNECT to resume or reload'); } }, onScoreboard: (s) => hud.scoreboard(s, cg), currentWeapon: () => cg.predicted ? cg.predicted.weapon : 0, hasWeapon: (w) => cg.predicted ? (cg.predicted.weapons & (1 << w)) !== 0 : true });
     input.sensitivity = settings.sens;
     running = true;
-    $('menu').classList.add('hidden'); hud.show(); $('crosshair').classList.toggle('large', settings.bigCrosshair);
-    if (!params.get('nolock')) input.lock();
+    hud.show(); $('crosshair').classList.toggle('large', settings.bigCrosshair);
+    if (!hostWaiting) { $('menu').classList.add('hidden'); if (!params.get('nolock')) input.lock(); }
+    else status('hosting: share the invite code below; the arena opens when your opponent connects');
     $('btn-connect').onclick = () => { if (running) { $('menu').classList.add('hidden'); input.lock(); audio.resume(); } };
     loop();
   } catch (e) { console.error(e); status('failed: ' + e.message); running = false; }

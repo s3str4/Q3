@@ -133,6 +133,10 @@ worldLightsChunk = patchBlock(worldLightsChunk, '#if ( NUM_DIR_LIGHTS > 0 )', (b
 worldLightsChunk = worldLightsChunk.replace('irradiance += getHemisphereLightIrradiance( hemisphereLights[ i ], geometryNormal );', '');
 if (!worldLightsChunk.includes('prevDiffuse =')) console.warn('world shader patch did not apply (three.js chunk changed?)');
 
+// Overbright clamp (irradiance units; the shader divides by pi): id Tech 3 lightmaps clip at 2x overbright, so a wall
+// standing inside a light pool reads as a fully lit, still textured surface instead of a white-out. Measured: at 6+ the
+// near-wall frames of the evidence runs were ~80% near-white; at 3.2 the same frames keep their texture.
+export const BAKE_CLAMP = 3.2;
 export function bakedMaterial(base) {
   const m = base.clone();
   m.userData = { ...base.userData };
@@ -146,7 +150,7 @@ export function bakedMaterial(base) {
       .replace('#include <lights_fragment_begin>', worldLightsChunk)
       // baked irradiance feeds the diffuse term and (there is no environment map) a share of it stands in for the
       // ambient specular metals would otherwise lack, so worn metal panels still catch the room's light
-      .replace('#include <lights_fragment_end>', '#include <lights_fragment_end>\nreflectedLight.indirectDiffuse += vBaked * BRDF_Lambert( diffuseColor.rgb );\nreflectedLight.indirectSpecular += vBaked * material.specularColor * ( 1.0 - 0.75 * material.roughness );');
+      .replace('#include <lights_fragment_end>', '#include <lights_fragment_end>\nvec3 bakedClamped = min( vBaked, vec3( ' + BAKE_CLAMP.toFixed(2) + ' ) );\nreflectedLight.indirectDiffuse += bakedClamped * BRDF_Lambert( diffuseColor.rgb );\nreflectedLight.indirectSpecular += bakedClamped * material.specularColor * ( 1.0 - 0.75 * material.roughness );');
   };
   m.customProgramCacheKey = () => 'baked';
   return m;
