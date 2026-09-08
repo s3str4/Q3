@@ -73,16 +73,9 @@ export class PeerTransport {
 }
 
 // ---- WebRTC P2P with copy/paste signaling (no server at all) ----
-// STUN for address discovery plus free public TURN relays (Open Relay by Metered: no account, shared public credentials)
-// as a fallback when a direct path is impossible (symmetric NATs, strict firewalls). Relayed traffic adds latency, so
-// ICE still prefers a direct candidate pair whenever one works.
-const RTC_CONFIG = {
-  iceServers: [
-    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:openrelay.metered.ca:80'] },
-    { urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443', 'turn:openrelay.metered.ca:443?transport=tcp', 'turns:openrelay.metered.ca:443?transport=tcp'], username: 'openrelayproject', credential: 'openrelayproject' },
-  ],
-  iceCandidatePoolSize: 2,
-};
+// STUN only: there is no free, account-less public TURN relay any more (Open Relay was tested: DNS lookup fails),
+// so two symmetric NATs cannot connect directly; the documented fallback is a dedicated server (port forward / tunnel).
+const RTC_CONFIG = { iceServers: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }], iceCandidatePoolSize: 2 };
 
 // Wait for ICE gathering. The code we exchange must carry a public (server-reflexive) candidate or two peers behind
 // different NATs can never connect, so keep waiting (up to 8 s) until STUN has answered or gathering completes.
