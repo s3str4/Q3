@@ -79,13 +79,14 @@ async function start(mode) {
     // never plays over unbaked black faces
     if (renderer.bakePromise) { status('baking lighting...'); await renderer.bakePromise; }
     cg.join(mode.bot ? { bot: true, botSkill: 0.6 } : {}); // ClientGame.join sends the protocol version and retries until WELCOME
-    input = input || new Input(canvas, { sensitivity: settings.sens, requireLock: !params.get('nolock'), onEscape: () => { if (running) { $('menu').classList.remove('hidden'); status('paused - click CONNECT to resume or reload'); } }, onScoreboard: (s) => hud.scoreboard(s, cg), currentWeapon: () => cg.predicted ? cg.predicted.weapon : 0, hasWeapon: (w) => cg.predicted ? (cg.predicted.weapons & (1 << w)) !== 0 : true });
+    input = input || new Input(canvas, { sensitivity: settings.sens, requireLock: !params.get('nolock'), keysAllowed: () => running && $('menu').classList.contains('hidden'), onLockChange: (locked) => { $('click-to-play').classList.toggle('hidden', locked || !running || !!params.get('nolock') || !$('menu').classList.contains('hidden')); }, onEscape: () => { if (running) { $('menu').classList.remove('hidden'); $('click-to-play').classList.add('hidden'); status('paused - click CONNECT to resume'); } }, onScoreboard: (s) => hud.scoreboard(s, cg), currentWeapon: () => cg.predicted ? cg.predicted.weapon : 0, hasWeapon: (w) => cg.predicted ? (cg.predicted.weapons & (1 << w)) !== 0 : true });
     input.sensitivity = settings.sens;
     running = true;
     hud.show(); $('crosshair').classList.toggle('large', settings.bigCrosshair);
-    if (!hostWaiting) { $('menu').classList.add('hidden'); if (!params.get('nolock')) input.lock(); }
+    if (!hostWaiting) { $('menu').classList.add('hidden'); if (!params.get('nolock')) { input.lock(); input.onLockChange(input.locked); } }
     else status('hosting: share the invite code below; the arena opens when your opponent connects');
-    $('btn-connect').onclick = () => { if (running) { $('menu').classList.add('hidden'); input.lock(); audio.resume(); } };
+    $('btn-connect').onclick = () => { if (running) { $('menu').classList.add('hidden'); input.lock(); input.onLockChange(input.locked); audio.resume(); } };
+    $('click-to-play').onclick = () => { input.lock(); audio.resume(); };
     loop();
   } catch (e) { console.error(e); status('failed: ' + e.message); running = false; }
 }

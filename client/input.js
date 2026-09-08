@@ -13,18 +13,23 @@ export class Input {
     this.mouseButtons = 0;
     this.weapon = 0; // requested weapon (0 = no change)
     this.locked = false; this.requireLock = opts.requireLock !== false;
+    this.keysAllowed = opts.keysAllowed || (() => true); // keyboard does not need the pointer lock (only mouse look does)
+    this.onLockChange = opts.onLockChange || (() => {});
     this.onEscape = opts.onEscape || (() => {});
     this.onScoreboard = opts.onScoreboard || (() => {});
     this.wheelDelta = 0; this.currentWeaponGetter = opts.currentWeapon || (() => 0); this.hasWeapon = opts.hasWeapon || (() => true);
     this.dx = 0; this.dy = 0; // accumulated mouse motion since the last sample (applied per frame)
-    document.addEventListener('pointerlockchange', () => { this.locked = document.pointerLockElement === canvas; if (!this.locked) { this.keys.clear(); this.mouseButtons = 0; this.onEscape(); } });
+    document.addEventListener('pointerlockchange', () => { const was = this.locked; this.locked = document.pointerLockElement === canvas; this.onLockChange(this.locked); if (was && !this.locked) { this.keys.clear(); this.mouseButtons = 0; this.onEscape(); } });
+    document.addEventListener('pointerlockerror', () => { this.onLockChange(false); });
+    // clicking the arena (re)captures the mouse: this is a real user gesture, so the browser always allows it
+    canvas.addEventListener('mousedown', () => { if (!this.locked && this.requireLock && this.keysAllowed()) this.lock(); });
     document.addEventListener('mousemove', (e) => { if (!this.locked && this.requireLock) return; this.dx += e.movementX; this.dy += e.movementY; });
     document.addEventListener('mousedown', (e) => { if (!this.locked && this.requireLock) return; e.preventDefault(); this.mouseButtons |= (1 << e.button); });
     document.addEventListener('mouseup', (e) => { this.mouseButtons &= ~(1 << e.button); });
     document.addEventListener('contextmenu', (e) => { if (this.locked) e.preventDefault(); });
     document.addEventListener('wheel', (e) => { if (!this.locked && this.requireLock) return; e.preventDefault(); this.cycleWeapon(e.deltaY > 0 ? 1 : -1); }, { passive: false });
     document.addEventListener('keydown', (e) => {
-      if (!this.locked && this.requireLock) return;
+      if (!this.keysAllowed()) return;
       if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
       if (e.code === 'Tab') { e.preventDefault(); this.onScoreboard(true); return; }
       if (KEY_WEAPON[e.code]) { this.weapon = KEY_WEAPON[e.code]; }
@@ -43,7 +48,12 @@ export class Input {
       if (this.hasWeapon(WHEEL_ORDER[i])) { this.weapon = WHEEL_ORDER[i]; return; }
     }
   }
-  lock() { this.canvas.requestPointerLock({ unadjustedMovement: true }).catch?.(() => this.canvas.requestPointerLock()); }
+  lock() {
+    try {
+      const p = this.canvas.requestPointerLock({ unadjustedMovement: true });
+      if (p && p.catch) p.catch(() => { try { const q = this.canvas.requestPointerLock(); if (q && q.catch) q.catch(() => this.onLockChange(false)); } catch { this.onLockChange(false); } });
+    } catch { try { this.canvas.requestPointerLock(); } catch { this.onLockChange(false); } }
+  }
   unlock() { document.exitPointerLock(); }
   // Apply accumulated mouse motion to view angles (called every render frame for lowest latency).
   applyMouse() {
