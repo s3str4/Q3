@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import { WEAPONS, WEAPON_DEFS, EV, PM } from '../../shared/constants.js';
 import { ma, normalize, sub, dist } from '../../shared/vec3.js';
 import { traceBox } from '../../shared/trace.js';
+import { clipPolygon } from '../../shared/brush.js';
 import { LightPool } from './lightpool.js';
 import { ParticlePool, getSprite } from './particles.js';
 import { Beam } from './beam.js';
@@ -22,13 +23,13 @@ export class Effects {
     this.sparks = new ParticlePool(scene, 1024, { additive: true, texture: 'hard', maxPx: 36, nearFade: 12 });
     this.glow = new ParticlePool(scene, 512, { additive: true, texture: 'soft', nearFade: 10 });
     this.fire = new ParticlePool(scene, 256, { additive: true, texture: 'fire', nearFade: 8 });
-    this.smoke = new ParticlePool(scene, 768, { additive: false, texture: 'smoke', nearFade: 14 });
+    this.smoke = new ParticlePool(scene, 768, { additive: false, texture: 'smoke', nearFade: 40, maxPx: 380 });
     this.blood = new ParticlePool(scene, 384, { additive: false, texture: 'hard', maxPx: 48, nearFade: 8 });
     this.beams = new Map(); // player id -> { beam, until, dir, light, own }
     this.mats = {
       flash: new THREE.MeshBasicMaterial({ color: 0xffd8a0, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false }),
-      ring: new THREE.MeshBasicMaterial({ color: 0xffb070, map: getSprite('soft'), transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }),
-      scorch: new THREE.MeshBasicMaterial({ color: 0x000000, map: getSprite('soft'), transparent: true, opacity: 0.85, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 }),
+      ring: new THREE.MeshBasicMaterial({ color: 0xffb070, map: getSprite('ring'), transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }),
+      scorch: new THREE.MeshBasicMaterial({ color: 0x000000, map: getSprite('scorch'), transparent: true, opacity: 0.85, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 }),
       railCore: new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 1, blending: THREE.AdditiveBlending, depthWrite: false }),
       railHalo: new THREE.MeshBasicMaterial({ color: 0x5cff9d, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }),
       gib: new THREE.MeshStandardMaterial({ color: 0x7a0f0f, emissive: 0x3a0505, roughness: 0.85, metalness: 0.05 }),
@@ -43,9 +44,10 @@ export class Effects {
       sphere: new THREE.SphereGeometry(1, 16, 12), ring: new THREE.RingGeometry(0.7, 1, 40), disc: new THREE.CircleGeometry(1, 24),
       gib: [0, 1, 2, 3].map((i) => new THREE.DodecahedronGeometry(3 + i * 1.5, 0)),
       rocketBody: new THREE.CylinderGeometry(3, 3, 18, 10), rocketTip: new THREE.ConeGeometry(3, 7, 10), fin: new THREE.BoxGeometry(6, 1, 5), plasma: new THREE.SphereGeometry(5, 12, 10),
-      railCore: new THREE.CylinderGeometry(1, 1, 1, 8, 1, true), railHalo: new THREE.CylinderGeometry(1, 1, 1, 10, 1, true),
+      railCore: new THREE.CylinderGeometry(1, 0.35, 1, 8, 1, true), railHalo: new THREE.CylinderGeometry(1, 0.12, 1, 10, 1, true), // radiusBottom (-y) sits at the muzzle: both taper toward the shooter, so our own trail is never a wedge across the screen
     };
     this.decalCount = 0;
+    this.map = null; // set by the renderer on loadMap: decals clip against map.brushes
     this.localMuzzle = null; // set by the renderer: () => [x,y,z]
     this.remoteMuzzle = null; // set by the renderer: (id) => [x,y,z] | null
   }
@@ -71,8 +73,8 @@ export class Effects {
       case EV.DEATH: if (e.gib) this.gibs(e.origin); break;
       case EV.FIRE: if (e.id === cg.localId) this.localFire(e, cg); else this.remoteFire(e, cg); break;
       case EV.JUMPPAD: this.padBurst(e.origin); break;
-      case EV.TELEPORT: this.teleFlash(e.origin); break;
-      case EV.RESPAWN: this.teleFlash(e.origin); break;
+      case EV.TELEPORT: this.teleFlash(e.origin, e.id === cg.localId); break;
+      case EV.RESPAWN: this.teleFlash(e.origin, e.id === cg.localId); break;
       case EV.PICKUP: this.pickupFlash(e.origin); break;
       case EV.ITEM_RESPAWN: this.pickupFlash(e.origin, 0xffffff, 0.5); break;
     }
@@ -186,15 +188,17 @@ export class Effects {
         if (type === WEAPONS.ROCKET) {
           g.userData.flame.material.opacity = 0.7 + Math.random() * 0.3; g.userData.flame.scale.setScalar(14 + Math.random() * 8);
           g.userData.light.intensity = 2200 + Math.random() * 1000;
-          // smoke trail: puffs every 14 ms of flight, expanding and fading grey; plus a short-lived exhaust glow
-          if (!lastSmoke) lastSmoke = now - 14;
-          for (let k = 0; now - lastSmoke >= 14 && k < 6; k++) {
-            lastSmoke += 14;
+          // smoke trail, Q3 CG_RocketTrail style: a discrete grey puff every 36 ms of flight (~32 units apart at
+          // rocket speed) that lingers ~1.5 s, drifting up; plus a short-lived exhaust glow behind the nozzle
+          if (!lastSmoke) lastSmoke = now - 36;
+          for (let k = 0; now - lastSmoke >= 36 && k < 4; k++) {
+            lastSmoke += 36;
             const back = (now - lastSmoke) / 1000; // place the puff where the rocket was at that instant
-            const p = [origin[0] - d[0] * 12 - v[0] * back, origin[1] - d[1] * 12 - v[1] * back, origin[2] - d[2] * 12 - v[2] * back];
-            self.smoke.spawn({ pos: p, vel: [rnd(-12, 12), rnd(-12, 12), rnd(8, 26)], life: rnd(700, 1100), size: 9, grow: 3.2, color: [0.42, 0.4, 0.38], alpha: 0.5, fade: 3, rot: rnd(0, 6.3), spin: rnd(-1, 1) });
-            if (k === 0) self.glow.spawn({ pos: p, life: 120, size: 10, color: [1, 0.55, 0.2], alpha: 0.9, fade: 1, shrink: 0.5, px: 120 });
+            const p = [origin[0] - d[0] * 14 - v[0] * back, origin[1] - d[1] * 14 - v[1] * back, origin[2] - d[2] * 14 - v[2] * back];
+            const shade = rnd(0.26, 0.36);
+            self.smoke.spawn({ pos: p, vel: [rnd(-8, 8), rnd(-8, 8), rnd(10, 22)], life: rnd(1300, 1700), size: 11, grow: 1.1, color: [shade, shade * 0.98, shade * 0.95], alpha: 0.6, fade: 4, rot: rnd(0, 6.3), spin: rnd(-1, 1) });
           }
+          if (now - lastGlow > 30) { lastGlow = now; self.glow.spawn({ pos: [origin[0] - d[0] * 12, origin[1] - d[1] * 12, origin[2] - d[2] * 12], life: 110, size: 10, color: [1, 0.55, 0.2], alpha: 0.9, fade: 1, shrink: 0.5, px: 120 }); }
           if (now - lastSmoke > 100) lastSmoke = now;
         } else if (type === WEAPONS.PLASMA && now - lastGlow > 16) { lastGlow = now; self.glow.spawn({ pos: origin, life: 160, size: 12, color: [0.7, 0.42, 1], alpha: 0.7, fade: 1, shrink: 0.8, px: 120 }); }
       },
@@ -225,8 +229,8 @@ export class Effects {
     }
     // shockwave ring on the surface
     if (big) {
-      const ring = new THREE.Mesh(this.geos.ring, this.mats.ring.clone()); ring.position.set(...ma(origin, 2, normal)); ring.lookAt(ring.position.x + normal[0], ring.position.y + normal[1], ring.position.z + normal[2]); ring.scale.setScalar(10); this.scene.add(ring);
-      this.add({ life: 380, obj: ring, upd: (k) => { ring.scale.setScalar(10 + k * 130); ring.material.opacity = 0.7 * (1 - k); } });
+      const ring = new THREE.Mesh(this.geos.disc, this.mats.ring.clone()); ring.position.set(...ma(origin, 2, normal)); ring.lookAt(ring.position.x + normal[0], ring.position.y + normal[1], ring.position.z + normal[2]); ring.scale.setScalar(10); this.scene.add(ring);
+      this.add({ life: 340, obj: ring, upd: (k) => { ring.scale.setScalar(12 + k * 150); ring.material.opacity = 0.75 * (1 - k) * (1 - k); } });
     }
     // light: strong but short, held 26 units off the surface (peak irradiance ~7 right under it for a few frames)
     this.flash(ma(o, 26, normal), big ? 0xff8a40 : 0xd8a0ff, big ? 5000 : 1600, big ? 700 : 300, life, (k) => Math.pow(1 - k, 1.6));
@@ -242,28 +246,37 @@ export class Effects {
       const spd = rnd(60, 220);
       this.glow.spawn({ pos: o, vel: [dir[0] * spd, dir[1] * spd, dir[2] * spd], life: rnd(500, 1000), size: rnd(3, 6), color: [1.3, 0.6, 0.15], alpha: 0.9, gravity: 400, drag: 1.5, fade: 3, px: 40 });
     }
-    // smoke column
-    const puffs = big ? 12 : 3;
+    // Smoke column: dense dark-grey puffs (linear ~0.1-0.2, i.e. mid-dark after ACES: darker than a lit wall, lighter
+    // than a shadowed corner) that rise and spread for ~2 s after the fireball is gone. Fade mode 4 brings each puff
+    // in over its first 12% so the column appears as the flames die instead of competing with them.
+    const puffs = big ? 14 : 3;
     for (let i = 0; i < puffs; i++) {
-      const dir = normalize([rnd(-1, 1), rnd(-1, 1), rnd(-0.3, 1) + normal[2]]);
-      const spd = rnd(30, big ? 110 : 60);
-      this.smoke.spawn({ pos: ma(o, rnd(0, 10), normal), vel: [dir[0] * spd, dir[1] * spd, dir[2] * spd + 18], life: rnd(1100, 1900), size: big ? rnd(18, 30) : 10, grow: 2.2, color: [0.2, 0.19, 0.18], alpha: 0.6, fade: 3, rot: rnd(0, 6.3), spin: rnd(-1.2, 1.2), drag: 1.8 });
+      const dir = normalize([rnd(-1, 1), rnd(-1, 1), rnd(-0.2, 1) + normal[2] * 0.8]);
+      const spd = rnd(20, big ? 90 : 50), shade = rnd(0.09, 0.2);
+      this.smoke.spawn({ pos: ma(o, rnd(2, 14), normal), vel: [dir[0] * spd, dir[1] * spd, dir[2] * spd + 34], life: big ? rnd(1400, 2200) : rnd(500, 800), size: big ? rnd(14, 24) : 8, grow: 2.2, color: [shade, shade * 0.97, shade * 0.94], alpha: big ? 0.72 : 0.5, fade: 4, rot: rnd(0, 6.3), spin: rnd(-1.2, 1.2), drag: 1.4 });
     }
     // scorch decal
-    this.decal(origin, normal, big ? 70 : 16, 0.85, 25000);
+    this.decal(origin, normal, big ? 70 : 16, big ? 0.92 : 0.8, 25000);
   }
+  // Scorch / bullet mark. Like Q3's R_MarkFragments the mark is projected along the hit normal onto every nearby
+  // brush face that roughly faces it and clipped to that face's edges, so a mark on a pillar or ledge never
+  // overhangs into empty space; the pieces are one mesh with the mark texture mapped through the decal basis.
   decal(origin, normal, size, opacity, life) {
-    if (this.decalCount > 40) return; // keep the number of long-lived transparent quads bounded
+    if (this.decalCount > 40) return; // keep the number of long-lived transparent meshes bounded
+    const geo = buildDecalGeometry(this.map, origin, normal, size);
+    if (!geo) return;
     this.decalCount++;
-    const m = new THREE.Mesh(this.geos.disc, this.mats.scorch.clone()); m.material.opacity = opacity; m.scale.setScalar(size / 2);
-    m.position.set(...ma(origin, 0.6, normal)); m.lookAt(m.position.x + normal[0], m.position.y + normal[1], m.position.z + normal[2]); m.rotation.z = Math.random() * 6.28; this.scene.add(m);
-    this.add({ life, obj: m, upd: (k) => { m.material.opacity = opacity * (1 - Math.max(0, (k - 0.7) / 0.3)); }, done: () => { this.decalCount--; } });
+    const m = new THREE.Mesh(geo, this.mats.scorch.clone()); m.material.opacity = opacity; m.frustumCulled = false; this.scene.add(m);
+    this.add({ life, obj: m, upd: (k) => { m.material.opacity = opacity * (1 - Math.max(0, (k - 0.7) / 0.3)); }, done: () => { this.decalCount--; geo.dispose(); } });
   }
   railTrail(start, end, own) {
     const d = sub(end, start); const len = Math.max(1, dist(start, end)); const dir = normalize(d);
     const mid = ma(start, len / 2, dir);
-    const core = new THREE.Mesh(this.geos.railCore, this.mats.railCore.clone()); core.scale.set(1.3, len, 1.3); core.material.color.setRGB(1.4, 1.7, 1.55);
-    const halo = new THREE.Mesh(this.geos.railHalo, this.mats.railHalo.clone()); halo.scale.set(3, len, 3); halo.material.opacity = 0.3;
+    const core = new THREE.Mesh(this.geos.railCore, this.mats.railCore.clone()); core.scale.set(1.3, len, 1.3); core.material.color.setRGB(1.05, 1.3, 1.15); // just over the bloom threshold: a glowing thread, not a bloom slab near the eye
+    // the halo is a cone that starts almost closed at the muzzle: seen from the shooter (or just beside the line
+    // after a sidestep) a uniform 8-unit tube starting at the gun is a wedge across half the screen
+    const haloLen = len;
+    const halo = new THREE.Mesh(this.geos.railHalo, this.mats.railHalo.clone()); halo.scale.set(3, haloLen, 3); halo.material.opacity = 0.3;
     const g = new THREE.Group(); g.add(core, halo); g.position.set(...mid);
     g.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(...dir)); this.scene.add(g);
     // spiral (Q3 rail rings): additive particles on a helix that drift outward as the trail fades
@@ -277,7 +290,7 @@ export class Effects {
       const p = ma(start, i * step, dir);
       this.glow.spawn({ pos: [p[0] + ox, p[1] + oy, p[2] + oz], vel: [ox * 1.2, oy * 1.2, oz * 1.2], life: 900, size: 2.6, color: [0.55, 1.35, 0.85], alpha: 0.95, fade: 3, grow: 0.5, px: 30 });
     }
-    this.add({ life: 800, obj: g, upd: (k) => { core.material.opacity = 1 - k; halo.material.opacity = 0.3 * (1 - k); halo.scale.set(3 + k * 7, len, 3 + k * 7); core.material.color.setRGB(1.4 - k * 0.6, 1.7 - k * 0.8, 1.55 - k * 0.7); } });
+    this.add({ life: 800, obj: g, upd: (k) => { core.material.opacity = 1 - k; halo.material.opacity = 0.3 * (1 - k); halo.scale.set(3 + k * 4, haloLen, 3 + k * 4); core.material.color.setRGB(1.05 - k * 0.45, 1.3 - k * 0.6, 1.15 - k * 0.5); } });
     this.flash(ma(start, 40, dir), 0x5cff9d, 2000, 360, 250, (k) => 1 - k);
     this.impact(end, normalize(sub(start, end)), WEAPONS.RAIL);
   }
@@ -326,13 +339,16 @@ export class Effects {
     this.flash([origin[0], origin[1], origin[2] + 24], 0xff2020, 1400, 220, 200);
   }
   padBurst(origin) {
-    const ring = new THREE.Mesh(this.geos.ring, this.mats.ring.clone()); ring.material.color.setHex(0x4ab3ff); ring.position.set(origin[0], origin[1], origin[2] - 22); ring.scale.setScalar(12); this.scene.add(ring);
+    const ring = new THREE.Mesh(this.geos.disc, this.mats.ring.clone()); ring.material.color.setHex(0x4ab3ff); ring.position.set(origin[0], origin[1], origin[2] - 22); ring.scale.setScalar(12); this.scene.add(ring);
     this.add({ life: 380, obj: ring, upd: (k) => { ring.scale.setScalar(12 + k * 50); ring.material.opacity = 0.8 * (1 - k); } });
     for (let i = 0; i < 14; i++) { const a = Math.random() * 6.28, r = rnd(8, 22); this.glow.spawn({ pos: [origin[0] + Math.cos(a) * r, origin[1] + Math.sin(a) * r, origin[2] - 20], vel: [0, 0, rnd(120, 260)], life: rnd(300, 500), size: rnd(4, 7), color: [0.35, 0.7, 1], alpha: 0.9, fade: 3 }); }
     this.flash([origin[0], origin[1], origin[2] + 8], 0x4ab3ff, 1500, 300, 250);
   }
-  teleFlash(origin) {
+  // Teleport / spawn fog. For the local player only the light remains: the particles would sit right in front of
+  // the camera as huge blurry discs (Q3 gives the local player a screen flash instead, see hud.js).
+  teleFlash(origin, local = false) {
     this.flash([origin[0], origin[1], origin[2] + 16], 0xbfa0ff, 4500, 420, 420, (k) => Math.pow(1 - k, 1.5));
+    if (local) return;
     this.glow.spawn({ pos: [origin[0], origin[1], origin[2] + 4], life: 420, size: 56, grow: 0.8, color: [0.8, 0.65, 1], alpha: 0.9, fade: 1 });
     for (let i = 0; i < 40; i++) { const a = Math.random() * 6.28, r = rnd(4, 18); this.glow.spawn({ pos: [origin[0] + Math.cos(a) * r, origin[1] + Math.sin(a) * r, origin[2] + rnd(-24, 30)], vel: [Math.cos(a) * rnd(10, 60), Math.sin(a) * rnd(10, 60), rnd(-40, 90)], life: rnd(400, 800), size: rnd(3, 6), color: [0.7, 0.5, 1], alpha: 0.9, fade: 3, drag: 1 }); }
   }
@@ -394,4 +410,58 @@ export class Effects {
     this.sparks.update(dt); this.glow.update(dt); this.fire.update(dt); this.smoke.update(dt); this.blood.update(dt);
   }
   get particleCount() { return this.sparks.active + this.glow.active + this.fire.active + this.smoke.active + this.blood.active; }
+}
+
+// ---------- decal projection ----------
+const DECAL_FACE_DOT = 0.55;   // faces tilted more than ~57 degrees from the hit normal do not receive the mark
+const DECAL_PLANE_DIST = 6;    // how far (units) the hit point may sit off a face's plane and still mark it
+// Project a size x size square centred on `origin` (facing `normal`) onto the brush faces around it and clip it to
+// each face. Returns a BufferGeometry (positions + uvs) or null when nothing was hit (e.g. no map yet).
+function buildDecalGeometry(map, origin, normal, size) {
+  if (!map || !map.brushes) return null;
+  const n = normalize(normal);
+  // decal basis, rotated by a random angle so repeated marks do not line up
+  const up = Math.abs(n[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+  const t0 = normalize([n[1] * up[2] - n[2] * up[1], n[2] * up[0] - n[0] * up[2], n[0] * up[1] - n[1] * up[0]]);
+  const b0 = [n[1] * t0[2] - n[2] * t0[1], n[2] * t0[0] - n[0] * t0[2], n[0] * t0[1] - n[1] * t0[0]];
+  const a = Math.random() * Math.PI * 2, ca = Math.cos(a), sa = Math.sin(a);
+  const t = [t0[0] * ca + b0[0] * sa, t0[1] * ca + b0[1] * sa, t0[2] * ca + b0[2] * sa];
+  const b = [b0[0] * ca - t0[0] * sa, b0[1] * ca - t0[1] * sa, b0[2] * ca - t0[2] * sa];
+  const h = size / 2;
+  const square = [[-h, -h], [h, -h], [h, h], [-h, h]].map(([u, v]) => [origin[0] + t[0] * u + b[0] * v, origin[1] + t[1] * u + b[1] * v, origin[2] + t[2] * u + b[2] * v]);
+  const positions = [], uvs = [];
+  const reach = h * 1.5 + DECAL_PLANE_DIST;
+  for (const br of map.brushes) {
+    if (br.nonsolid || (br.flags & 6) || !br.polys) continue; // triggers, NODRAW and PLAYERCLIP carry no marks
+    if (br.mins[0] > origin[0] + reach || br.maxs[0] < origin[0] - reach || br.mins[1] > origin[1] + reach || br.maxs[1] < origin[1] - reach || br.mins[2] > origin[2] + reach || br.maxs[2] < origin[2] - reach) continue;
+    for (const poly of br.polys) {
+      const pn = poly.plane.n, pd = poly.plane.d;
+      const facing = pn[0] * n[0] + pn[1] * n[1] + pn[2] * n[2];
+      if (facing < DECAL_FACE_DOT) continue;
+      const dist = pn[0] * origin[0] + pn[1] * origin[1] + pn[2] * origin[2] - pd;
+      if (dist < -DECAL_PLANE_DIST || dist > DECAL_PLANE_DIST) continue;
+      // project the square onto this face's plane along the decal normal
+      let frag = square.map((p) => { const k = (pd - (pn[0] * p[0] + pn[1] * p[1] + pn[2] * p[2])) / facing; return [p[0] + n[0] * k, p[1] + n[1] * k, p[2] + n[2] * k]; });
+      // clip to the face's edges (edge planes point outward whichever way the polygon is wound)
+      const v = poly.verts;
+      const e0 = sub(v[1], v[0]), e1 = sub(v[2], v[0]);
+      const wind = (e0[1] * e1[2] - e0[2] * e1[1]) * pn[0] + (e0[2] * e1[0] - e0[0] * e1[2]) * pn[1] + (e0[0] * e1[1] - e0[1] * e1[0]) * pn[2] < 0 ? -1 : 1;
+      for (let i = 0; i < v.length && frag.length >= 3; i++) {
+        const p0 = v[i], p1 = v[(i + 1) % v.length], e = sub(p1, p0);
+        const en = normalize([(e[1] * pn[2] - e[2] * pn[1]) * wind, (e[2] * pn[0] - e[0] * pn[2]) * wind, (e[0] * pn[1] - e[1] * pn[0]) * wind]);
+        frag = clipPolygon(frag, { n: en, d: en[0] * p0[0] + en[1] * p0[1] + en[2] * p0[2] });
+      }
+      if (frag.length < 3) continue;
+      // fan-triangulate; uv = position in the decal basis; lift 0.4 units off the face (plus polygon offset)
+      const uv = (p) => [((p[0] - origin[0]) * t[0] + (p[1] - origin[1]) * t[1] + (p[2] - origin[2]) * t[2]) / size + 0.5, ((p[0] - origin[0]) * b[0] + (p[1] - origin[1]) * b[1] + (p[2] - origin[2]) * b[2]) / size + 0.5];
+      const lift = (p) => [p[0] + pn[0] * 0.4, p[1] + pn[1] * 0.4, p[2] + pn[2] * 0.4];
+      // the square is wound counter-clockwise around n, and the projection keeps that around pn (facing > 0)
+      for (let i = 1; i + 1 < frag.length; i++) for (const j of [0, i, i + 1]) { positions.push(...lift(frag[j])); uvs.push(...uv(frag[j])); }
+    }
+  }
+  if (!positions.length) return null;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  return geo;
 }

@@ -5,11 +5,19 @@
 // Reports peak dBFS, RMS dBFS and duration per cue as a JSON table (.evidence/audio/measure.json), a palette sheet
 // (.evidence/audio/palette.png: waveform + spectrogram per cue), WAVs of every cue, and asserts the competitive mixing rules.
 // Exit code is non-zero when a rule is violated.
+// Every cue with an own + enemy variant is also rendered with the enemy at 100 and 600 units in six directions (front, back,
+// left, right, above, below) and must never be quieter than the own cue in any of them.
 // usage: node tools/audio_measure.mjs [--port 27981] [--out .evidence/audio] [--calibrate] [--no-wav] [--headed]
 //        [--only rocketFire,rail] (regex filter: render matching cues only, print the table, skip rules) [--limiter off]
+//        [--dirs] (with --only: also print the directional variants)
+//        --hrtf: measure Chrome's raw HRTF panner response (L/R dB vs a direct connection) per direction and frequency
+//        -> .evidence/audio/hrtf.json; the basis of HRTF_COMP in client/audio/audio.js
 //        --live [seconds]: instead of offline renders, play a real practice match vs a bot in the browser and sample the live
 //        engine (context state, voice/loop counts, events heard, damage coalescing) -> .evidence/audio/live.json; asserts running
-//        context, no zombies and one hit tone / pain grunt per tick. [--mode arena|duel] (live default: arena = full loadout)
+//        context, no zombies, one hit tone per tick and at most one pain grunt per 700 ms per player (Q3 P_DamageFeedback).
+//        [--mode arena|duel] (live default: arena = full loadout)
+// Offline the same pain debounce is asserted through event() + a 120 fps update() clock: 20 PAIN ticks in 1 s -> exactly 2
+// grunts, never overlapping, at single-grunt level, while the attacker still gets 20 hit tones (CPMA).
 import fs from 'node:fs';
 import path from 'node:path';
 import { createServer } from '../server/index.mjs';
@@ -52,17 +60,24 @@ const CUES = [
   { name: 'win', kind: 'ui', target: -10, maxDur: 1.6 }, { name: 'lose', kind: 'ui', target: -10, maxDur: 1.2 }, { name: 'alert', kind: 'ui', target: -12, maxDur: 0.4 },
 ];
 const WEAPON_FIRE = ['machinegunFire', 'shotgunFire', 'rocketFire', 'railFire', 'plasmaFire', 'gauntletFire', 'lightningLoop'];
+// listener looks down +X with +Z up (angles [0,0,0]): right is -Y (Q3 angleVectors). Directional variants of every dual cue.
+const DIRS = { front: [1, 0, 0], back: [-1, 0, 0], left: [0, 1, 0], right: [0, -1, 0], above: [0, 0, 1], below: [0, 0, -1] };
+const DIR_DIST = [100, 600];
+const REF_DIST = 320, distanceDb = (d) => d <= REF_DIST ? 0 : 20 * Math.log10(REF_DIST / d); // inverse model, rolloff 1: -5.46 dB at 600
 
 const live = args.live ? +(args.live === true ? 20 : args.live) : 0;
 // live runs default to arena mode: players spawn with the full arsenal, so every weapon (and the shotgun's multi-pellet hits) is exercised
 const server = await createServer({ port, map: 'arena_duel', mode: args.mode || (live ? 'arena' : 'duel'), bots: live ? 1 : 0, quiet: true, botSkill: live ? 0.4 : 0.6 });
-const browser = await puppeteer.launch({ executablePath: EDGE, headless: !args.headed, args: ['--use-angle=d3d11', '--autoplay-policy=no-user-gesture-required', '--window-size=1400,900', '--no-sandbox'] });
+// protocolTimeout: an offline render normally takes < 1 s but a loaded machine (several browsers rendering at once) can stall
+// one for minutes; the default 180 s would abort the whole run
+const browser = await puppeteer.launch({ executablePath: EDGE, headless: !args.headed, protocolTimeout: 600000, args: ['--use-angle=d3d11', '--autoplay-policy=no-user-gesture-required', '--window-size=1400,900', '--no-sandbox'] });
 const page = await browser.newPage();
 const consoleErrors = [];
 page.on('console', (m) => { if (m.type() === 'error' && !/favicon/.test((m.location() || {}).url || '')) consoleErrors.push(m.text().slice(0, 300)); });
 page.on('pageerror', (e) => consoleErrors.push('pageerror: ' + e.message));
 if (live) { await liveRun(); process.exit(process.exitCode || 0); }
 await page.goto(`http://localhost:${port}/`, { waitUntil: 'load' });
+if (args.hrtf) { await hrtfRun(); process.exit(process.exitCode || 0); }
 
 // In-page renderer: one OfflineAudioContext per spec, real engine, analysis done in the page to keep transfers small.
 await page.evaluate(() => {
@@ -74,22 +89,28 @@ await page.evaluate(() => {
     const ctx = new OfflineAudioContext(2, Math.ceil(sr * seconds), sr);
     const eng = new mod.AudioEngine({ context: ctx, ambient: !!spec.ambient, limiter: spec.limiter !== false, seed: 7 });
     eng.init(); eng.setVolume(1); eng.updateListener([0, 0, 0], [0, 0, 0]);
-    const cg = { localId: 1, remote: new Map(), game: null, remoteProjectiles: [] };
+    const cg = { localId: 1, remote: new Map(spec.remote || []), game: null, remoteProjectiles: [] };
     if (spec.probe) { const o = ctx.createOscillator(); o.frequency.value = 1000; const g = ctx.createGain(); g.gain.value = spec.probe; o.connect(g); g.connect(eng.master); o.start(0); o.stop(1.2); }
     // Chrome's DynamicsCompressor starts a fresh context with its gain ramped down (~12 dB loss on a burst at t=0, settled by
     // ~0.2 s): trigger the cues at T0 so they are measured the way a live, long-running context plays them.
     const T0 = spec.t0 ?? 0.25;
     const checks = {};
-    // an OfflineAudioContext accepts one suspend per render quantum: group every action scheduled at the same time
-    const sched = new Map(); const at = (t, fn) => { const k = +t.toFixed(4); if (!sched.has(k)) sched.set(k, []); sched.get(k).push(fn); };
+    // an OfflineAudioContext accepts one suspend per render quantum (128 samples): actions are keyed by quantum index and the
+    // suspend is placed one sample into that quantum, so two keys can never quantize to the same suspend time
+    const Q = 128; const sched = new Map(); const at = (t, fn) => { const k = Math.floor(t * sr / Q); if (!sched.has(k)) sched.set(k, []); sched.get(k).push(fn); };
     at(T0, () => { for (const c of spec.cues || []) eng.cue(c.name, { origin: c.origin, local: c.local, id: c.id, velocity: c.velocity }); });
     // event frames: raw game events fed through eng.event() at T0 + at, followed by the per-frame eng.update() (which flushes the
     // coalesced damage cues) - this is exactly the client's onEvent()/update() sequence for one rendered frame.
-    for (const fr of spec.frames || []) at(T0 + (fr.at || 0), () => { for (const e of fr.events || []) eng.event(e, cg, false); eng.update(cg, 0); checks.createdAfterFrames = eng.counters.created; });
-    for (const [t, fns] of sched) ctx.suspend(t).then(() => { for (const f of fns) f(); ctx.resume(); });
-    if (spec.stopAt) ctx.suspend(T0 + spec.stopAt).then(() => { eng.update(cg, 0); ctx.resume(); });
-    const checkAt = spec.checkAt || seconds - 0.05;
-    ctx.suspend(checkAt).then(() => { checks.beforeGc = eng.stats(); eng.update(cg, 0); checks.afterGc = eng.stats(); ctx.resume(); });
+    for (const fr of spec.frames || []) at(T0 + (fr.at || 0), () => { if (fr.remote) cg.remote = new Map(fr.remote); for (const e of fr.events || []) eng.event(e, cg, false); eng.update(cg, 0); checks.createdAfterFrames = eng.counters.created; });
+    // pain / hit-tone audit: every grunt and tone voiced is logged (time, health, player), and with spec.fps the engine's update()
+    // runs on a frame clock like the client's, sampling how many grunts are alive at once and the peak live voice count
+    const painCalls = [], toneCalls = [], painVoices = []; let maxPainAlive = 0, maxVoices = 0;
+    const pain0 = eng.pain.bind(eng); eng.pain = (o, l, h, id) => { const v = pain0(o, l, h, id); painCalls.push({ t: +(ctx.currentTime - T0).toFixed(3), health: h, local: !!l, id }); painVoices.push(v); return v; };
+    const tone0 = eng.hitTone.bind(eng); eng.hitTone = (d) => { toneCalls.push({ t: +(ctx.currentTime - T0).toFixed(3), damage: d }); return tone0(d); };
+    if (spec.fps) for (let t = 0; T0 + t < seconds - 0.1; t += 1 / spec.fps) at(T0 + t, () => { eng.update(cg, 0); maxPainAlive = Math.max(maxPainAlive, painVoices.filter((v) => !v.dead).length); maxVoices = Math.max(maxVoices, eng.voices.size); });
+    if (spec.stopAt) at(T0 + spec.stopAt, () => eng.update(cg, 0));
+    at(spec.checkAt || seconds - 0.05, () => { checks.beforeGc = eng.stats(); eng.update(cg, 0); checks.afterGc = eng.stats(); });
+    for (const [k, fns] of sched) ctx.suspend((k * Q + 1) / sr).then(() => { for (const f of fns) f(); ctx.resume(); });
     const buf = await ctx.startRendering();
     const L = buf.getChannelData(0), R = buf.getChannelData(1); const n = L.length;
     const thr = Math.pow(10, -60 / 20);
@@ -135,34 +156,40 @@ await page.evaluate(() => {
     if (f40 >= 0) for (let i0 = f40 - hop; i0 < l40 - hop + 1; i0 += hop) { const r = analyze(i0); sumA += r.msA; sumMs += r.ms; sumSub += r.sub; nw++; }
     const ext = l40 - f40 + 1, dBp = (p) => p > 0 ? +(10 * Math.log10(p)).toFixed(2) : -120;
     const loud = { aMom: dBp(aMom), aMean: nw ? dBp(sumA * hop / ext) : -120, sub300: nw && sumMs > 0 ? +(sumSub / sumMs).toFixed(3) : 0 };
-    return { peak: dB(Math.max(peakL, peakR)), peakL: dB(peakL), peakR: dB(peakR), rms: dB(rms), duration: first < 0 ? 0 : +((last - first + 1) / sr).toFixed(3), start: first < 0 ? null : +(first / sr).toFixed(3), ...loud, env, spec: spec2, checks, peakHz, tierBands, final: eng.stats(), created: eng.counters.created, trims: mod.CUE_TRIM, remoteGain: mod.REMOTE_GAIN, wav, sr: sr / 2 };
+    return { peak: dB(Math.max(peakL, peakR)), peakL: dB(peakL), peakR: dB(peakR), rms: dB(rms), duration: first < 0 ? 0 : +((last - first + 1) / sr).toFixed(3), start: first < 0 ? null : +(first / sr).toFixed(3), ...loud, env, spec: spec2, checks, peakHz, tierBands, painCalls, toneCalls, maxPainAlive, maxVoices, final: eng.stats(), created: eng.counters.created, spatial: eng.counters.spatial, dropped: eng.counters.dropped, trims: mod.CUE_TRIM, remoteGain: mod.REMOTE_GAIN, hrtfComp: mod.HRTF_COMP, wav, sr: sr / 2 };
   };
 });
-const render = (spec) => page.evaluate((s) => window.__render(s), { ...spec, limiter: args.limiter === 'off' ? false : spec.limiter });
+// one retry: a render that hit the protocol timeout is re-issued in a fresh OfflineAudioContext (renders are deterministic)
+const render = async (spec) => { const s = { ...spec, limiter: args.limiter === 'off' ? false : spec.limiter }; try { return await page.evaluate((s) => window.__render(s), s); } catch (e) { console.error('render failed, retrying once:', String(e).split('\n')[0]); return page.evaluate((s) => window.__render(s), s); } };
 const only = args.only ? new RegExp(String(args.only).split(',').join('|')) : null;
 
-const rows = []; let trims = null, remoteGain = 1;
+const rows = []; let trims = null, remoteGain = 1, hrtfComp = null;
 const get = (cue, variant, dist) => rows.find((r) => r.cue === cue && r.variant === variant && r.dist === dist);
 const get0 = (cue, variant) => get(cue, variant, 0);
 const sheet = []; // for the palette png
-function origin(d, side) { return side ? [0, -d, 0] : [d || 1, 0, 0]; }
+function origin(d) { return [d || 1, 0, 0]; }
 for (const c of CUES) {
   if (only && !only.test(c.name)) continue;
   const base = { stopAt: c.stopAt, seconds: c.loop ? 1.8 : 2.5, rmsWindow: c.loop ? [0.35, 0.75] : undefined };
   const variants = [];
   if (c.kind === 'dual' || c.kind === 'ui') variants.push({ label: 'own', d: 0, cues: [{ name: c.name, local: true, origin: [0, 0, 0], velocity: c.velocity }], wav: true });
   if (c.kind !== 'ui') for (const d of [...DIST, ...(c.extraDist || [])]) variants.push({ label: 'enemy', d, cues: [{ name: c.name, local: false, origin: origin(d), velocity: c.velocity }], wav: c.kind === 'world' && d === 0 });
-  if (c.name === 'footstep') variants.push({ label: 'enemy-right', d: 600, cues: [{ name: c.name, local: false, origin: origin(600, true) }] });
+  // six directions at 100 u (inside the reference distance: pure HRTF response) and 600 u
+  if (c.kind === 'dual' && (!only || args.dirs)) for (const d of DIR_DIST) for (const [dn, dv] of Object.entries(DIRS)) variants.push({ label: 'enemy-' + dn, d, cues: [{ name: c.name, local: false, origin: dv.map((x) => x * d), velocity: c.velocity, id: 2 }] });
   for (const v of variants) {
     const r = await render({ ...base, cues: v.cues, wav: !!v.wav && !args['no-wav'] });
-    trims = r.trims; remoteGain = r.remoteGain;
+    trims = r.trims; remoteGain = r.remoteGain; hrtfComp = r.hrtfComp;
     const row = { cue: c.name, variant: v.label, dist: v.d, peak: r.peak, peakL: r.peakL, peakR: r.peakR, rms: r.rms, aMom: r.aMom, aMean: r.aMean, sub300: r.sub300, duration: r.duration, voicesBeforeGc: r.checks.beforeGc?.voices, voicesAfterGc: r.checks.afterGc?.voices, loopsAfterGc: r.checks.afterGc?.loops, created: r.final.created, killed: r.final.killed };
     // weapon fires: also the pre-limiter peak (own and point blank), the level the limiter threshold is compared against
     if (WEAPON_FIRE.includes(c.name) && v.d === 0) row.peakPre = (await render({ ...base, cues: v.cues, limiter: false })).peak;
     rows.push(row);
     if ((v.label === 'own') || (c.kind === 'world' && v.d === 0)) sheet.push({ name: c.name, env: r.env, spec: r.spec, peak: r.peak, duration: r.duration });
     if (r.wav && !args['no-wav']) writeWav(path.join(outDir, `${c.name}.wav`), r.wav, r.sr);
-    process.stdout.write(`${c.name.padEnd(16)} ${v.label.padEnd(12)} ${String(v.d).padStart(5)}u  peak ${String(r.peak).padStart(7)} dBFS${row.peakPre !== undefined ? ` (pre ${String(row.peakPre).padStart(6)})` : ''.padEnd(13)}  rms ${String(r.rms).padStart(7)}  A-mom ${String(r.aMom).padStart(7)}  A-mean ${String(r.aMean).padStart(7)}  <300Hz ${String(Math.round(r.sub300 * 100)).padStart(3)}%  dur ${r.duration}s\n`);
+    process.stdout.write(`${c.name.padEnd(16)} ${v.label.padEnd(12)} ${String(v.d).padStart(5)}u  peak ${String(r.peak).padStart(7)} dBFS${row.peakPre !== undefined ? ` (pre ${String(row.peakPre).padStart(6)})` : ''.padEnd(13)}  L/R ${String(r.peakL).padStart(7)}/${String(r.peakR).padEnd(7)}  rms ${String(r.rms).padStart(7)}  A-mom ${String(r.aMom).padStart(7)}  A-mean ${String(r.aMean).padStart(7)}  <300Hz ${String(Math.round(r.sub300 * 100)).padStart(3)}%  dur ${r.duration}s\n`);
+  }
+  if (c.kind === 'dual' && (!only || args.dirs)) { // directional summary: enemy - own in dB per direction, 100 u and 600 u (model -5.46 dB)
+    const own = get(c.name, 'own', 0).peak;
+    process.stdout.write(`${''.padEnd(16)} vs own:  ` + DIR_DIST.map((d) => `${d}u ` + Object.keys(DIRS).map((dn) => `${dn} ${(get(c.name, 'enemy-' + dn, d).peak - own - distanceDb(d)).toFixed(1).padStart(5)}`).join(' ')).join('   |   ') + '\n');
   }
 }
 if (only) { await browser.close(); await server.close(); process.exit(0); }
@@ -202,6 +229,48 @@ if (coalHit.wav && !args['no-wav']) writeWav(path.join(outDir, 'shotgun_hit_coal
 const coalescing = { hitEvents: 11, painEvents: 11, voicesHitOnly: coalHit.created, voicesHitAndPain: coalBoth.created, voicesTwoFrames: twoFrames.created, toneHz: coalHit.peakHz, toneHzWithPain: coalBoth.peakHz, tone4Hz: tone4Pre.peakHz, tierBandsDb: coalHit.tierBands, tierBandsDbWithPain: coalBoth.tierBands, peakHitOnly: coalHit.peak, peakHitOnlyPre: coalHitPre.peak, peakHitAndPain: coalBoth.peak, peakHitAndPainPre: coalBothPre.peak, stackedPerEventPre: stackedPre.peak, singleTone4: tone4.peak, singleTone4Pre: tone4Pre.peak, singleTone1: tone1.peak };
 console.log('damage coalescing:', JSON.stringify(coalescing));
 
+// ---- pain debounce (Q3 P_DamageFeedback: one pain sound per 700 ms per player): 1 s of lightning on one player is 20 damage
+// ticks 50 ms apart. Through event() + a 120 fps update() clock the victim must grunt exactly twice (t = 0 and 0.7 s), never two
+// grunts at once, at single-grunt level - while the attacker still gets one hit tone per tick (CPMA). ----
+const ENEMY = [100, 0, 0], FPS = 120;
+const painStream = (id, dmg, health0, n = 20, dt = 0.05, mk = (i) => []) => Array.from({ length: n }, (_, i) => ({ at: i * dt, events: [{ type: EV.PAIN, id, attacker: id === 1 ? 2 : 1, damage: dmg, health: health0 - dmg * (i + 1), origin: id === 1 ? [0, 0, 0] : ENEMY, mod: WEAPONS.LIGHTNING, self: false }, ...mk(i)] }));
+const painEnemy = await render({ frames: painStream(2, 8, 200), fps: FPS, wav: !args['no-wav'] });      // 200 hp: every grunt stays tier light
+const painEnemyPre = await render({ frames: painStream(2, 8, 200), fps: FPS, limiter: false });
+const painLocal = await render({ frames: painStream(1, 8, 200), fps: FPS });
+const painEscalate = await render({ frames: painStream(2, 5, 100), fps: FPS });                          // health 95 -> 0: the second grunt must carry the lowest pending health
+const painPerEvent = await render({ cues: painStream(2, 8, 200).map(() => ({ name: 'painLight', origin: ENEMY, local: false })), limiter: false }); // 20 grunts stacked at once (per-event voicing, worst case)
+const painThenDeath = await render({ frames: [{ at: 0, events: [{ type: EV.PAIN, id: 2, attacker: 1, damage: 100, health: -10, origin: ENEMY, mod: WEAPONS.ROCKET }, { type: EV.DEATH, id: 2, attacker: 1, mod: WEAPONS.ROCKET, origin: ENEMY, gib: false }] }], fps: FPS });
+const painAfterRespawn = await render({ frames: [{ at: 0, events: [{ type: EV.PAIN, id: 2, attacker: 1, damage: 8, health: 92, origin: ENEMY, mod: 1 }] }, { at: 0.3, events: [{ type: EV.DEATH, id: 2, attacker: 1, mod: 1, origin: ENEMY, gib: false }] }, { at: 0.5, events: [{ type: EV.RESPAWN, id: 2, origin: ENEMY }, { type: EV.PAIN, id: 2, attacker: 1, damage: 8, health: 92, origin: ENEMY, mod: 1 }] }], fps: FPS });
+// the full exchange as the attacker hears it: own LG fire + victim PAIN + own HIT + LG_HIT sizzle, 20 ticks
+const lgExchange = await render({ frames: painStream(2, 8, 200, 20, 0.05, (i) => [{ type: EV.FIRE, id: 1, weapon: WEAPONS.LIGHTNING, origin: [0, 0, 0], seq: i }, { type: EV.HIT, id: 1, target: 2, damage: 8, origin: ENEMY, weapon: WEAPONS.LIGHTNING }, { type: EV.LG_HIT, id: 1, origin: ENEMY }]), fps: FPS, stopAt: 1.0, wav: !args['no-wav'] });
+// ... and as the victim: enemy LG fire + own PAIN + LG_HIT on us
+const lgVictim = await render({ frames: Array.from({ length: 20 }, (_, i) => ({ at: i * 0.05, events: [{ type: EV.FIRE, id: 2, weapon: WEAPONS.LIGHTNING, origin: ENEMY, seq: i }, { type: EV.PAIN, id: 1, attacker: 2, damage: 8, health: 200 - 8 * (i + 1), origin: [0, 0, 0], mod: WEAPONS.LIGHTNING }, { type: EV.LG_HIT, id: 2, origin: [0, 0, 0] }] })), fps: FPS, stopAt: 1.0 });
+if (painEnemy.wav && !args['no-wav']) writeWav(path.join(outDir, 'pain_lg_debounced.wav'), painEnemy.wav, painEnemy.sr);
+if (lgExchange.wav && !args['no-wav']) writeWav(path.join(outDir, 'lg_exchange.wav'), lgExchange.wav, lgExchange.sr);
+const painLightEnemy100 = get('painLight', 'enemy-front', 100), painLightOwn = get('painLight', 'own', 0);
+const painRate = {
+  events: 20, spacingMs: 50, debounceMs: 700,
+  enemy: { voices: painEnemy.created, grunts: painEnemy.painCalls, maxPainAlive: painEnemy.maxPainAlive, maxVoices: painEnemy.maxVoices, peak: painEnemy.peak, peakPre: painEnemyPre.peak, rms: painEnemy.rms, singlePainLight100: painLightEnemy100.peak, singlePainLight0: painRef.peak },
+  local: { voices: painLocal.created, grunts: painLocal.painCalls, maxPainAlive: painLocal.maxPainAlive, peak: painLocal.peak, singlePainLight: painLightOwn.peak },
+  escalate: { grunts: painEscalate.painCalls },
+  perEventStacked: { voices: painPerEvent.created, peakPre: painPerEvent.peak },
+  painThenDeath: { voices: painThenDeath.created, grunts: painThenDeath.painCalls.length },
+  painAfterRespawn: { grunts: painAfterRespawn.painCalls },
+  lgExchange: { voices: lgExchange.created, hitTones: lgExchange.toneCalls.length, grunts: lgExchange.painCalls.length, maxPainAlive: lgExchange.maxPainAlive, maxVoices: lgExchange.maxVoices, peak: lgExchange.peak, rms: lgExchange.rms },
+  lgVictim: { voices: lgVictim.created, grunts: lgVictim.painCalls.length, maxPainAlive: lgVictim.maxPainAlive, maxVoices: lgVictim.maxVoices, peak: lgVictim.peak },
+};
+console.log('pain debounce:', JSON.stringify(painRate));
+
+// ---- origin resolution: a remote FOOTSTEP (no origin in the event) with the player unknown / known / known only from an earlier event ----
+const FOOT = { type: EV.FOOTSTEP, id: 2 };
+const pick = (r) => ({ created: r.created, spatial: r.spatial, dropped: r.dropped, peak: r.peak });
+const originCases = {
+  unknown: pick(await render({ frames: [{ at: 0, events: [FOOT] }] })),
+  known: pick(await render({ remote: [[2, { origin: [600, 0, 0] }]], frames: [{ at: 0, events: [FOOT] }] })),
+  lastKnown: pick(await render({ frames: [{ at: 0, events: [{ type: EV.PAIN, id: 2, attacker: 1, damage: 10, health: 90, origin: [-600, 0, 0], mod: 1 }] }, { at: 0.5, remote: [], events: [FOOT] }] })),
+};
+console.log('origin resolution:', JSON.stringify(originCases));
+
 // ---- rules ----
 const failures = [], checks = [];
 const rule = (ok, text) => { checks.push({ ok, text }); if (!ok) failures.push(text); };
@@ -215,6 +284,19 @@ rule(Math.abs(b2[1300] - b1[1300]) <= 1.5 && b2[1300] >= b2[620] + 6, `coalesced
 rule(coalHitPre.peak <= -8 && coalBothPre.peak <= -8, `coalesced blast pre-limiter peak ${coalHitPre.peak} dBFS (with pain ${coalBothPre.peak}) <= -8 dBFS (per-event stacking would give ${stackedPre.peak})`);
 rule(Math.abs(coalHit.peak - tone4.peak) <= 1, `coalesced tone post-limiter peak ${coalHit.peak} dBFS within +-1 dB of single hitTone4 ${tone4.peak}`);
 rule(coalBoth.peak >= tone4.peak - 1 && coalBoth.peak <= Math.max(tone4.peak, painRef.peak) + 1, `coalesced tone + grunt post-limiter peak ${coalBoth.peak} dBFS within +-1 dB of the louder single cue (hitTone4 ${tone4.peak}, enemy painLight ${painRef.peak})`);
+// pain debounce (Q3 700 ms per player): grunt count, no overlap, single-grunt level, tier escalation, death/respawn handling
+const gruntTimes = (r) => r.painCalls.map((p) => p.t).join(', ');
+rule(painEnemy.created === 2 && painEnemy.painCalls.length === 2, `pain debounce: 20 x PAIN(8) on enemy id 2 at 50 ms spacing over 1 s -> ${painEnemy.created} voices / ${painEnemy.painCalls.length} grunts at [${gruntTimes(painEnemy)}] s (expect exactly 2)`);
+rule(painEnemy.painCalls.length === 2 && Math.abs(painEnemy.painCalls[1].t - painEnemy.painCalls[0].t - 0.7) <= 0.02, `pain debounce: second enemy grunt ${(painEnemy.painCalls[1]?.t - painEnemy.painCalls[0]?.t).toFixed(3)} s after the first (expect 0.70 +-0.02)`);
+rule(painEnemy.maxPainAlive <= 1, `pain debounce: never more than one enemy grunt alive at once (max ${painEnemy.maxPainAlive}, ${painEnemy.maxVoices} voices total)`);
+rule(Math.abs(painEnemy.peak - painLightEnemy100.peak) <= 1, `pain debounce: post-limiter peak ${painEnemy.peak} dBFS within +-1 dB of a single enemy painLight at 100 u ${painLightEnemy100.peak} (enemy@0 ${painRef.peak}; 20 stacked per-event grunts would give ${painPerEvent.peak} pre-limiter)`);
+rule(painLocal.created === 2 && painLocal.painCalls.length === 2, `pain debounce: 20 x PAIN(8) on the local player id 1 -> ${painLocal.created} voices / ${painLocal.painCalls.length} grunts at [${gruntTimes(painLocal)}] s (expect exactly 2)`);
+rule(painLocal.maxPainAlive <= 1 && Math.abs(painLocal.peak - painLightOwn.peak) <= 1, `pain debounce (local): max ${painLocal.maxPainAlive} grunt alive, peak ${painLocal.peak} within +-1 dB of own painLight ${painLightOwn.peak}`);
+rule(painEscalate.painCalls.length === 2 && painEscalate.painCalls[1].health === 25, `pain debounce escalates: health 95 -> 0 by 5 per tick -> grunts ${JSON.stringify(painEscalate.painCalls.map((p) => [p.t, p.health]))} (second grunt voiced with the lowest pending health 25 = heavy tier)`);
+rule(painThenDeath.created === 1 && painThenDeath.painCalls.length === 0, `lethal PAIN + DEATH in one tick -> ${painThenDeath.created} voice (death cry only), ${painThenDeath.painCalls.length} grunts`);
+rule(painAfterRespawn.painCalls.length === 2, `pain window reset by death/respawn: PAIN, DEATH +0.3 s, RESPAWN + PAIN +0.5 s -> grunts at [${gruntTimes(painAfterRespawn)}] s (expect 2)`);
+rule(lgExchange.toneCalls.length === 20 && lgExchange.painCalls.length === 2 && lgExchange.maxPainAlive <= 1, `LG exchange (attacker): 20 ticks of FIRE+PAIN+HIT+LG_HIT -> ${lgExchange.toneCalls.length} hit tones (expect 20, per tick), ${lgExchange.painCalls.length} grunts (expect 2), max ${lgExchange.maxPainAlive} grunt alive, ${lgExchange.maxVoices} voices peak, mix peak ${lgExchange.peak} dBFS`);
+rule(lgVictim.painCalls.length === 2 && lgVictim.maxPainAlive <= 1, `LG exchange (victim): 20 ticks of enemy FIRE + own PAIN + LG_HIT -> ${lgVictim.painCalls.length} grunts (expect 2), max ${lgVictim.maxPainAlive} alive, mix peak ${lgVictim.peak} dBFS`);
 for (const r of rows) rule(r.peak <= -0.5, `no clipping: ${r.cue}/${r.variant}@${r.dist} peak ${r.peak} <= -0.5 dBFS`);
 rule(stress.peak <= -0.3, `stress mix (explosion+SG+RG+pain+hit+LG+RL) peak ${stress.peak} <= -0.3 dBFS`);
 rule(explGR <= 4, `limiter never pumps: rocket explosion gain reduction ${explGR} dB <= 4`);
@@ -233,7 +315,24 @@ for (const n of ['machinegunFire', 'railFire', 'shotgunFire', 'plasmaFire']) rul
 // headroom: a single weapon fire never reaches the limiter threshold (-3 dBFS): pre-limiter peak <= -6 dBFS own and point blank
 for (const n of WEAPON_FIRE) for (const vr of ['own', 'enemy']) rule(get(n, vr, 0).peakPre <= -6, `pre-limiter headroom: ${n}/${vr}@0 peak ${get(n, vr, 0).peakPre} <= -6 dBFS`);
 for (const c of CUES.filter((c) => c.kind === 'dual')) rule(get(c.name, 'enemy', 0).peak >= get(c.name, 'own', 0).peak - 0.5, `enemy >= own: ${c.name} enemy@0 ${get(c.name, 'enemy', 0).peak} >= own ${get(c.name, 'own', 0).peak} - 0.5`);
-const fs600 = get('footstep', 'enemy', 600), fsR = get('footstep', 'enemy-right', 600);
+// ... in every direction: the HRTF loses 4-6 dB at 2-5 kHz behind / above / below the listener (see --hrtf); the direction-aware
+// compensation must bring every cue back to >= own at 100 u, and >= own + model (-5.46 dB) at 600 u. Also bounded above: no
+// direction may be more than 4 dB louder than the same cue straight ahead (the side near-ear gain is ~+2.5), so the
+// compensation does not overshoot and a cue keeps one loudness whichever way the listener faces.
+for (const c of CUES.filter((c) => c.kind === 'dual')) for (const d of DIR_DIST) {
+  const own = get(c.name, 'own', 0).peak, floor = own + distanceDb(d) - 0.5, front = get(c.name, 'enemy-front', d).peak;
+  for (const dn of Object.keys(DIRS)) { const r = get(c.name, 'enemy-' + dn, d); rule(r.peak >= floor, `enemy >= own (${dn}, ${d}u): ${c.name} ${r.peak} >= own ${own} ${d > REF_DIST ? `+ model ${distanceDb(d).toFixed(2)} ` : ''}- 0.5`); }
+  const mx = Math.max(...Object.keys(DIRS).map((dn) => get(c.name, 'enemy-' + dn, d).peak));
+  rule(mx <= front + 4, `directional overshoot (${d}u): ${c.name} loudest direction ${mx} <= front ${front} + 4`);
+}
+const fs600 = get('footstep', 'enemy', 600), fsR = get('footstep', 'enemy-right', 600), fsB = get('footstep', 'enemy-back', 100), mgB = get('machinegunFire', 'enemy-back', 100);
+rule(fsB.peak >= -14.6, `footstep 100u behind: peak ${fsB.peak} >= -14.6 dBFS`);
+rule(mgB.peak >= -7.8, `machinegun 100u behind: peak ${mgB.peak} >= -7.8 dBFS`);
+// origin resolution for remote body cues (EV.FOOTSTEP carries no origin): unknown player -> dropped, not voiced non-spatially;
+// player in cg.remote -> one spatial voice; player seen earlier in an event with an origin but since gone from cg.remote -> spatial at that origin
+rule(originCases.unknown.created === 0 && originCases.unknown.dropped === 1, `unresolvable remote footstep (id 2, empty cg.remote) -> ${originCases.unknown.created} voices (expect 0), dropped ${originCases.unknown.dropped} (expect 1), peak ${originCases.unknown.peak}`);
+rule(originCases.known.created === 1 && originCases.known.spatial === 1 && Math.abs(originCases.known.peak - fs600.peak) <= 0.5, `remote footstep with cg.remote at 600u front -> ${originCases.known.created} voice, spatial ${originCases.known.spatial}, peak ${originCases.known.peak} (enemy@600 ${fs600.peak} +-0.5)`);
+rule(originCases.lastKnown.created === 2 && originCases.lastKnown.spatial === 2 && originCases.lastKnown.dropped === 0, `remote footstep after PAIN with origin, player gone from cg.remote -> ${originCases.lastKnown.created} voices (expect 2), spatial ${originCases.lastKnown.spatial} (expect 2), dropped ${originCases.lastKnown.dropped}`);
 rule(fs600.peak >= -30, `enemy footstep audible at 600u: peak ${fs600.peak} >= -30 dBFS`);
 rule(Math.abs(fsR.peakL - fsR.peakR) >= 6, `enemy footstep located at 600u (right side): |L-R| ${Math.abs(fsR.peakL - fsR.peakR).toFixed(2)} dB >= 6`);
 rule(get('respawnMajor', 'enemy', 1500).peak >= -24 && get('respawnMajor', 'enemy', 3000).peak >= -30, `major respawn map-wide: peak@1500 ${get('respawnMajor', 'enemy', 1500).peak} >= -24, @3000 ${get('respawnMajor', 'enemy', 3000).peak} >= -30`);
@@ -277,7 +376,7 @@ const png = await page.evaluate((tiles) => {
 }, sheet);
 fs.writeFileSync(path.join(outDir, 'palette.png'), Buffer.from(png, 'base64'));
 
-const report = { generated: new Date().toISOString(), remoteGain, trims, makeupGainDb: makeup, rocketExplosionGainReductionDb: explGR, stressMix: { peak: stress.peak, gainReductionDb: stressGR, voicesAfter: stress.final.voices }, ambient: { peak: amb.peak, rms: amb.rms }, coalescing, rows, checks, failures, suggestedTrims: suggest, suggestedRemoteGain: suggestRemote, consoleErrors };
+const report = { generated: new Date().toISOString(), remoteGain, hrtfComp, trims, makeupGainDb: makeup, originCases, rocketExplosionGainReductionDb: explGR, stressMix: { peak: stress.peak, gainReductionDb: stressGR, voicesAfter: stress.final.voices }, ambient: { peak: amb.peak, rms: amb.rms }, coalescing, painRate, rows, checks, failures, suggestedTrims: suggest, suggestedRemoteGain: suggestRemote, consoleErrors };
 fs.writeFileSync(path.join(outDir, 'measure.json'), JSON.stringify(report, null, 2));
 console.log(`\n${checks.length - failures.length}/${checks.length} rules passed. Report: ${path.relative(process.cwd(), path.join(outDir, 'measure.json'))}, palette: ${path.relative(process.cwd(), path.join(outDir, 'palette.png'))}`);
 if (failures.length) { console.log('FAILURES:'); for (const f of failures) console.log(' - ' + f); }
@@ -288,23 +387,31 @@ process.exit(failures.length ? 1 : 0);
 // engine is sampled twice a second; at the end it idles so every voice must be gone.
 async function liveRun() {
   await page.goto(`http://localhost:${port}/?auto=1&bot=1&nolock=1&name=AudioLive`, { waitUntil: 'load' });
-  await page.waitForFunction(() => window.__arena && window.__arena.cg && window.__arena.cg.predicted && window.__arena.audio.ctx, { timeout: 15000 });
+  // instrument as soon as the engine exists (before the first snapshot arrives) so the join sequence is audited too
+  await page.waitForFunction(() => window.__arena && window.__arena.audio && window.__arena.audio.ctx, { timeout: 15000 });
   // Instrumentation: count events by type as the engine receives them, and audit the damage coalescing: local HIT / PAIN events
   // are grouped by render frame (the engine flushes in update()) and by arrival burst (events > 8 ms apart came from different
   // server ticks); the number of hit tones / pain grunts actually voiced must sit between those two counts and far below the
   // raw event count whenever a multi-pellet shotgun blast landed (maxHitsPerFrame > 1).
   await page.evaluate((SG) => {
     const a = window.__arena.audio; window.__evCount = {}; window.__frame = 0;
-    const c = window.__coal = { hitEvents: 0, hitFrames: 0, hitBursts: 0, hitTones: 0, maxHitsPerFrame: 0, painEvents: 0, painFrames: 0, painBursts: 0, painGrunts: 0, maxPainPerFrame: 0, hitsByWeapon: {}, hitFrameSizes: {} };
+    const c = window.__coal = { hitEvents: 0, hitFrames: 0, hitBursts: 0, hitTones: 0, maxHitsPerFrame: 0, painEvents: 0, painFrames: 0, painBursts: 0, painGrunts: 0, maxPainPerFrame: 0, hitsByWeapon: {}, hitFrameSizes: {}, painById: {} };
+    // per player: PAIN events, grunts actually voiced, span of the PAIN stream, and the grunt count a Q3 700 ms debounce would
+    // give on the arrival times (lethal PAINs are not voiced and, like the engine, reset the window)
+    const painOf = (id, now) => c.painById[id] || (c.painById[id] = { events: 0, grunts: 0, first: now, last: now, expected: 0, simT: -1e9 });
+    const notePainId = (e, now) => { const p = painOf(e.id, now); p.events++; p.last = now; if (e.health <= 0) { p.simT = -1e9; return; } if (now - p.simT >= 700) { p.expected++; p.simT = now; } };
     const st = { hit: { frame: -1, last: -1e9, n: 0 }, pain: { frame: -1, last: -1e9, n: 0 } };
     const note = (k) => { const s = st[k], now = performance.now(); c[k + 'Events']++; if (now - s.last > 8) c[k + 'Bursts']++; s.last = now; if (s.frame !== window.__frame) { s.frame = window.__frame; s.n = 0; c[k + 'Frames']++; } s.n++; c[k === 'hit' ? 'maxHitsPerFrame' : 'maxPainPerFrame'] = Math.max(c[k === 'hit' ? 'maxHitsPerFrame' : 'maxPainPerFrame'], s.n); };
-    const orig = a.event.bind(a); a.event = (e, cg, p) => { window.__evCount[e.type] = (window.__evCount[e.type] || 0) + 1; if (e.type === 2 && e.id === cg.localId) { note('hit'); c.hitsByWeapon[e.weapon] = (c.hitsByWeapon[e.weapon] || 0) + 1; c.hitFrameSizes[st.hit.n] = (c.hitFrameSizes[st.hit.n] || 0) + 1; if (st.hit.n > 1) c.hitFrameSizes[st.hit.n - 1]--; } if (e.type === 5 && e.id === cg.localId) note('pain'); return orig(e, cg, p); };
+    // dropped remote body cues (player position unresolvable): log type, whether the player was in cg.remote, and when
+    window.__dropped = [];
+    const orig = a.event.bind(a); a.event = (e, cg, p) => { window.__evCount[e.type] = (window.__evCount[e.type] || 0) + 1; if (e.type === 2 && e.id === cg.localId) { note('hit'); c.hitsByWeapon[e.weapon] = (c.hitsByWeapon[e.weapon] || 0) + 1; c.hitFrameSizes[st.hit.n] = (c.hitFrameSizes[st.hit.n] || 0) + 1; if (st.hit.n > 1) c.hitFrameSizes[st.hit.n - 1]--; } if (e.type === 5) { notePainId(e, performance.now()); if (e.id === cg.localId) note('pain'); } const d0 = a.counters.dropped; const r = orig(e, cg, p); if (a.counters.dropped > d0) window.__dropped.push({ type: e.type, id: e.id, inRemote: cg.remote.has(e.id), remoteIds: [...cg.remote.keys()], t: +(performance.now() / 1000).toFixed(2) }); return r; };
     const upd = a.update.bind(a); a.update = (cg, now) => { upd(cg, now); window.__frame++; };
     const ht = a.hitTone.bind(a); a.hitTone = (d) => { c.hitTones++; return ht(d); };
-    const pn = a.pain.bind(a); a.pain = (o, l, h) => { if (l) c.painGrunts++; return pn(o, l, h); };
+    const pn = a.pain.bind(a); a.pain = (o, l, h, id) => { if (l) c.painGrunts++; if (id !== undefined) painOf(id, performance.now()).grunts++; return pn(o, l, h, id); };
     // aim at the nearest opponent (server rewinds hitscan to the interpolated position we are looking at) so weapons connect
     window.__aim = setInterval(() => { const A = window.__arena, cg = A.cg; if (!cg || !cg.predicted || !A.input) return; let best = null, bd = 1e9; for (const r of cg.remote.values()) { const d = Math.hypot(r.origin[0] - cg.predicted.ps.origin[0], r.origin[1] - cg.predicted.ps.origin[1]); if (d < bd) { bd = d; best = r; } } if (!best) return; const eye = cg.predicted.ps.origin, vh = cg.predicted.ps.viewHeight || 26; const dx = best.origin[0] - eye[0], dy = best.origin[1] - eye[1], dz = best.origin[2] + 4 - (eye[2] + vh); A.input.setAngles(-Math.atan2(dz, Math.hypot(dx, dy)) * 180 / Math.PI, Math.atan2(dy, dx) * 180 / Math.PI); if (bd < 900 && cg.predicted.weapon !== SG) A.input.weapon = SG; }, 30);
   }, WEAPONS.SHOTGUN);
+  await page.waitForFunction(() => window.__arena.cg && window.__arena.cg.predicted, { timeout: 15000 });
   const samples = []; const t0 = Date.now(); let held = new Set(); let step = 0;
   // shotgun first and often (the coalescing audit needs multi-pellet hits), then the rest of the arsenal
   // always pushing toward the opponent we are aiming at (the aim helper switches to the shotgun inside 900 units so the
@@ -322,7 +429,7 @@ async function liveRun() {
       await page.evaluate((f) => { const inp = window.__arena.input; if (inp) inp.mouseButtons = f ? 1 : 0; }, !!s.fire);
     }
     if (!active && held.size) { for (const k of held) await page.keyboard.up(k); held.clear(); await page.evaluate(() => { const inp = window.__arena.input; if (inp) inp.mouseButtons = 0; }); }
-    const s = await page.evaluate(() => { const a = window.__arena.audio; return { ...a.stats(), sampleRate: a.ctx.sampleRate, baseLatency: a.ctx.baseLatency, events: { ...window.__evCount }, coal: { ...window.__coal } }; });
+    const s = await page.evaluate(() => { const a = window.__arena.audio; return { ...a.stats(), sampleRate: a.ctx.sampleRate, baseLatency: a.ctx.baseLatency, events: { ...window.__evCount }, coal: { ...window.__coal }, droppedEvents: window.__dropped.slice() }; });
     s.t = +el.toFixed(2); samples.push(s);
     await new Promise((r) => setTimeout(r, 500));
   }
@@ -341,14 +448,52 @@ async function liveRun() {
   const co = last.coal;
   if (!(co.hitFrames > 0 || co.painFrames > 0)) fails.push('no damage exchanged in the live run: ' + JSON.stringify(co));
   if (!(co.hitTones >= co.hitFrames && co.hitTones <= co.hitBursts)) fails.push(`hit tones not coalesced per tick: ${co.hitTones} tones for ${co.hitEvents} HIT events in ${co.hitFrames} frames / ${co.hitBursts} bursts`);
-  if (!(co.painGrunts >= co.painFrames && co.painGrunts <= co.painBursts)) fails.push(`pain grunts not coalesced per tick: ${co.painGrunts} grunts for ${co.painEvents} PAIN events in ${co.painFrames} frames / ${co.painBursts} bursts`);
+  if (!(co.painGrunts <= co.painBursts && (co.painEvents === 0 || co.painGrunts >= 1))) fails.push(`pain grunts not coalesced per tick: ${co.painGrunts} grunts for ${co.painEvents} PAIN events in ${co.painFrames} frames / ${co.painBursts} bursts`);
+  // pain debounce per player (Q3: one grunt per 700 ms): grunts <= ceil(span / 0.7) + 1, and within +-1 of the count a 700 ms
+  // debounce on the arrival times predicts (the engine's window runs on flush-to-flush time, one frame later than arrival)
+  for (const [id, p] of Object.entries(co.painById || {})) {
+    const span = Math.max(0, (p.last - p.first) / 1000), cap = Math.ceil(span / 0.7) + 1;
+    p.spanSeconds = +span.toFixed(2); p.cap = cap;
+    if (p.grunts > cap) fails.push(`pain not debounced for player ${id}: ${p.grunts} grunts for ${p.events} PAIN events over ${span.toFixed(2)} s (cap ceil(span/0.7)+1 = ${cap})`);
+    if (Math.abs(p.grunts - p.expected) > 1) fails.push(`pain debounce drift for player ${id}: ${p.grunts} grunts, a 700 ms debounce on the ${p.events} arrivals predicts ${p.expected} (+-1)`);
+  }
   if (co.maxHitsPerFrame > 1 && co.hitTones >= co.hitEvents) fails.push(`multi-pellet hits voiced per pellet: ${co.hitTones} tones for ${co.hitEvents} HIT events`);
   if (consoleErrors.length) fails.push('console errors: ' + JSON.stringify(consoleErrors.slice(0, 5)));
-  const out = { seconds: live, state: last.state, sampleRate: last.sampleRate, baseLatency: last.baseLatency, maxVoices, oldestVoiceAge: oldest, final: { voices: last.voices, loops: last.loops, created: last.created, killed: last.killed }, events, coalescing: co, fails, samples };
+  const dropped = (last.droppedEvents || []).map((d) => ({ ...d, type: EVN[d.type] || d.type }));
+  // a dropped cue is only legitimate while the player is not in cg.remote (never seen) - any drop for a placed player is a bug
+  const badDrops = dropped.filter((d) => d.inRemote);
+  if (badDrops.length) fails.push(`body cues dropped for players present in cg.remote: ${JSON.stringify(badDrops.slice(0, 5))}`);
+  const out = { seconds: live, state: last.state, sampleRate: last.sampleRate, baseLatency: last.baseLatency, maxVoices, oldestVoiceAge: oldest, final: { voices: last.voices, loops: last.loops, created: last.created, killed: last.killed, spatial: last.spatial, dropped: last.dropped }, events, dropped, coalescing: co, fails, samples: samples.map((s) => ({ ...s, droppedEvents: undefined })) };
   fs.writeFileSync(path.join(outDir, 'live.json'), JSON.stringify(out, null, 2));
   console.log(JSON.stringify({ ...out, samples: undefined }, null, 2));
   await browser.close(); await server.close();
   process.exitCode = fails.length ? 1 : 0;
+}
+// --hrtf: raw PannerNode (HRTF, no compensation) response per direction: sine tones at FREQS, RMS of L and R over the steady
+// state, in dB relative to the same tone connected directly. Directions are unit vectors in the listener frame (looking down +X, +Z up).
+async function hrtfRun() {
+  const FREQS = [125, 180, 250, 350, 500, 700, 1000, 1400, 2000, 2500, 3000, 3500, 4000, 5000, 6000, 8000, 10000];
+  const dirs = { ...Object.fromEntries(Object.entries(DIRS).map(([k, v]) => [k, v.map((x) => x * 100)])),
+    frontLeft: [70.7, 70.7, 0], backLeft: [-70.7, 70.7, 0], frontUp: [70.7, 0, 70.7], backUp: [-70.7, 0, 70.7], frontDown: [70.7, 0, -70.7], backDown: [-70.7, 0, -70.7], leftUp: [0, 70.7, 70.7],
+    az30: [86.6, 50, 0], az60: [50, 86.6, 0], az120: [-50, 86.6, 0], az150: [-86.6, 50, 0], el30: [86.6, 0, 50], el_30: [86.6, 0, -50] };
+  const measure = (pos) => page.evaluate(async (pos, FREQS) => {
+    const sr = 48000, step = 0.3; const ctx = new OfflineAudioContext(2, Math.ceil(sr * (FREQS.length * step + 0.2)), sr);
+    const l = ctx.listener; l.positionX.value = 0; l.positionY.value = 0; l.positionZ.value = 0; l.forwardX.value = 1; l.forwardY.value = 0; l.forwardZ.value = 0; l.upX.value = 0; l.upY.value = 0; l.upZ.value = 1;
+    let dest = ctx.destination;
+    if (pos) { const p = ctx.createPanner(); p.panningModel = 'HRTF'; p.distanceModel = 'inverse'; p.refDistance = 320; p.maxDistance = 3000; p.rolloffFactor = 1; p.positionX.value = pos[0]; p.positionY.value = pos[1]; p.positionZ.value = pos[2]; p.connect(ctx.destination); dest = p; }
+    FREQS.forEach((f, i) => { const o = ctx.createOscillator(); o.frequency.value = f; const g = ctx.createGain(); g.gain.value = 0.3; o.connect(g); g.connect(dest); o.start(i * step); o.stop(i * step + 0.25); });
+    const buf = await ctx.startRendering(); const L = buf.getChannelData(0), R = buf.getChannelData(1); const res = {};
+    FREQS.forEach((f, i) => { const i0 = Math.floor((i * step + 0.1) * sr), i1 = Math.floor((i * step + 0.24) * sr); let sl = 0, sr2 = 0; for (let k = i0; k < i1; k++) { sl += L[k] * L[k]; sr2 += R[k] * R[k]; } const dB = (x) => 10 * Math.log10(x / (i1 - i0) + 1e-20); res[f] = [dB(sl), dB(sr2)]; });
+    return res;
+  }, pos, FREQS);
+  const direct = await measure(null); const rel = {};
+  for (const [name, pos] of Object.entries(dirs)) { const r = await measure(pos); rel[name] = {}; for (const f of FREQS) rel[name][f] = [+(r[f][0] - direct[f][0]).toFixed(1), +(r[f][1] - direct[f][0]).toFixed(1)]; }
+  let txt = 'Hz'.padEnd(6) + Object.keys(rel).map((n) => n.padStart(13)).join('') + '\n';
+  for (const f of FREQS) txt += String(f).padEnd(6) + Object.values(rel).map((r) => `${String(r[f][0]).padStart(6)}/${String(r[f][1]).padEnd(6)}`).join('') + '\n';
+  console.log('HRTF panner response, L/R dB relative to direct:\n' + txt);
+  fs.writeFileSync(path.join(outDir, 'hrtf.json'), JSON.stringify({ generated: new Date().toISOString(), freqs: FREQS, directions: dirs, dB: rel }, null, 1));
+  console.log('written ' + path.relative(process.cwd(), path.join(outDir, 'hrtf.json')));
+  await browser.close(); await server.close();
 }
 function median(a) { const s = [...a].sort((x, y) => x - y); return s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2; }
 function writeWav(file, samples, sr) {

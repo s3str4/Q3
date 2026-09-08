@@ -17,14 +17,27 @@ import { angleVectors } from '../../shared/vec3.js';
 export const REF_DIST = 320, MAX_DIST = 3000, ROLLOFF = 1;
 export const SPEED_OF_SOUND = 3000;          // ups, for the rocket flight doppler (rocket = 900 ups -> +-0.3 octave)
 export const REMOTE_GAIN = 1.35;             // spatial voices: compensates the HRTF frontal loss so enemy cues are >= own cues at equal distance
-// EQ on spatial voices flattening Chrome's frontal HRTF (measured, docs/AUDIO.md): +3.8 dB below 300 Hz, -5 dB dip around 1 kHz.
-export const HRTF_COMP = { peakFreq: 1000, peakGain: 4, peakQ: 0.8, shelfFreq: 250, shelfGain: -3 };
+// Direction-aware EQ on spatial voices flattening Chrome's HRTF (measured per direction with `node tools/audio_measure.mjs --hrtf`,
+// table in docs/AUDIO.md). Relative to a direct connection the HRTF is +3 dB below 300 Hz and -5 dB around 1 kHz from the
+// front; from behind / above / below it loses a further 4-6 dB in the 2-5 kHz band that carries the locating cues (footstep
+// tap, MG crack), while the near ear from the side is flat. Each spatial voice runs low shelf -> 1 kHz peak -> 3.3 kHz peak
+// with gains blended from the five hemisphere entries by the source direction in the listener's frame (see dirComp()).
+// Entries: [low shelf dB @250 Hz, peak dB @1 kHz, peak dB @3.3 kHz, broadband dB].
+export const HRTF_COMP = {
+  shelfFreq: 250, peakFreq: 1000, peakQ: 0.8, hfFreq: 3300, hfQ: 0.55,
+  front: [-3, 4, 0, 0], back: [-0.5, 1.5, 7.5, 0], side: [-3, 0, 0.5, 0], above: [-2.5, 4, 5.5, 0], below: [-2, 0.5, 6.5, 0],
+};
 export const CEILING = 0.95;                 // soft-clip ceiling after the limiter (Chrome's compressor alone lets summed peaks exceed 0 dBFS)
 export const MAX_VOICES = 48;                // oldest one-shot voice is dropped beyond this
 // Damage events are voiced per tick, not per event: shared/game.js emits one EV.HIT / EV.PAIN per shotgun pellet (and per
 // splash victim), so HITs per attacker and PAINs per target that arrive within one tick window are summed into a single
 // damage-scaled hit tone and a single pain grunt (Q3/CPMA play exactly one per blast). Queued in event(), flushed in update().
 export const COALESCE_WINDOW = 1 / 60;
+// Pain grunts are further debounced per target like Q3 (g_active.c P_DamageFeedback: pain_debounce_time = level.time + 700):
+// the first PAIN in a window is voiced at once, later ones inside the window are silent and only lower the health the next
+// grunt will be voiced with (so the tier still escalates). Hit tones are NOT debounced (CPMA: one per damage tick), so a
+// lightning beam still ticks 20 times a second in the attacker's ears while the victim grunts at most every 700 ms.
+export const PAIN_DEBOUNCE = 0.7;
 export const BUS_LEVELS = { weapons: 1.0, impacts: 1.0, player: 1.0, enemy: 1.0, items: 1.0, ui: 1.0, ambient: 1.0 };
 // Safety limiter only: cues are trimmed to peak <= -6 dBFS pre-limiter so a single cue never reaches the threshold (no pumping);
 // it only catches the sum of simultaneous cues (rocket + rail + pain + hit tone...).
@@ -43,6 +56,9 @@ export const CUE_TRIM = {
 };
 
 const T = CUE_TRIM;
+// Events voiced at the emitting player's position (as opposed to at e.origin of a world point): dropped for a remote player
+// whose position is unknown, see event().
+const BODY_EVENTS = new Set([EV.FIRE, EV.PAIN, EV.DEATH, EV.JUMP, EV.LAND, EV.FOOTSTEP, EV.PICKUP, EV.JUMPPAD, EV.TELEPORT, EV.RESPAWN]);
 
 export class AudioEngine {
   // opts: { context: existing (Offline)AudioContext, ambient: true, limiter: true, seed: number for deterministic randomness }
@@ -50,10 +66,13 @@ export class AudioEngine {
     this.opts = { ambient: true, limiter: true, ...opts };
     this.ctx = null; this.enabled = false; this.volume = 0.8;
     this.listenerPos = [0, 0, 0]; this.listenerVel = [0, 0, 0]; this.listenerT = 0;
+    this.listenerAxes = { forward: [1, 0, 0], right: [0, -1, 0], up: [0, 0, 1] };
     this.voices = new Set(); this.rocketLoops = new Map(); this.lgLoops = new Map(); this.ambientVoice = null;
-    this.counters = { created: 0, killed: 0 };
+    this.counters = { created: 0, killed: 0, spatial: 0, dropped: 0 };   // spatial: voices with a panner; dropped: remote body cues whose origin could not be resolved
     this.lastFootstep = new Map();
+    this.lastOrigin = new Map();   // player id -> last origin seen in any event or snapshot (fallback for body cues of a player missing from cg.remote)
     this.pendingHits = new Map(); this.pendingPain = new Map();   // per-tick damage coalescing (see COALESCE_WINDOW)
+    this.painDebounce = new Map();  // target id -> { t: time of the last voiced grunt, health: lowest health seen since (pending tier escalation) }
     const seed = this.opts.seed;
     this.rand = seed === undefined ? Math.random : (() => { let s = (seed >>> 0) || 1; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; })();
     this.cues = this.buildCueTable();
@@ -87,7 +106,7 @@ export class AudioEngine {
     for (const l of this.rocketLoops.values()) l.stop(); this.rocketLoops.clear();
     if (this.ambientVoice) { this.ambientVoice.stop(); this.ambientVoice = null; }
     for (const v of [...this.voices]) this.kill(v);
-    this.pendingHits.clear(); this.pendingPain.clear();
+    this.pendingHits.clear(); this.pendingPain.clear(); this.painDebounce.clear(); this.lastOrigin.clear(); this.lastFootstep.clear();
     if (this.ctx.close && !this.opts.context) this.ctx.close();
     this.enabled = false;
   }
@@ -95,7 +114,7 @@ export class AudioEngine {
   // Diagnostics for tests: live voice/loop counts and context state. voices must return to 0 after every cue ends.
   stats() {
     let oldest = 0; if (this.ctx) for (const v of this.voices) if (!v.loop) oldest = Math.max(oldest, this.ctx.currentTime - v.born);
-    return { state: this.ctx ? this.ctx.state : 'none', voices: this.voices.size, loops: this.lgLoops.size + this.rocketLoops.size, oldest: +oldest.toFixed(2), created: this.counters.created, killed: this.counters.killed, reduction: this.limiter ? this.limiter.reduction : 0 };
+    return { state: this.ctx ? this.ctx.state : 'none', voices: this.voices.size, loops: this.lgLoops.size + this.rocketLoops.size, oldest: +oldest.toFixed(2), created: this.counters.created, killed: this.counters.killed, spatial: this.counters.spatial, dropped: this.counters.dropped, reduction: this.limiter ? this.limiter.reduction : 0 };
   }
 
   makeNoise(seconds) {
@@ -111,6 +130,7 @@ export class AudioEngine {
     if (dt > 0.004 && dt < 0.25) this.listenerVel = [(eye[0] - this.listenerPos[0]) / dt, (eye[1] - this.listenerPos[1]) / dt, (eye[2] - this.listenerPos[2]) / dt];
     this.listenerPos = [eye[0], eye[1], eye[2]]; this.listenerT = t;
     const av = angleVectors(angles);
+    this.listenerAxes = av;
     const l = this.ctx.listener;
     if (l.positionX) {
       l.positionX.setValueAtTime(eye[0], t); l.positionY.setValueAtTime(eye[1], t); l.positionZ.setValueAtTime(eye[2], t);
@@ -125,27 +145,45 @@ export class AudioEngine {
     const ctx = this.ctx;
     const spatial = !!origin && !o.local;
     const g = ctx.createGain(); g.gain.value = (o.gain ?? 1) * (spatial ? REMOTE_GAIN : 1);
-    const v = { in: g, panner: null, end: 0, pending: 0, loop: !!o.loop, dead: false, born: ctx.currentTime, bus };
+    const v = { in: g, panner: null, end: 0, pending: 0, loop: !!o.loop, dead: false, born: ctx.currentTime, bus, baseGain: g.gain.value };
     if (spatial) {
       const p = ctx.createPanner(); p.panningModel = 'HRTF'; p.distanceModel = 'inverse'; p.refDistance = o.ref ?? REF_DIST; p.maxDistance = o.maxDist ?? MAX_DIST; p.rolloffFactor = o.rolloff ?? ROLLOFF;
-      const eq = ctx.createBiquadFilter(); eq.type = 'peaking'; eq.frequency.value = HRTF_COMP.peakFreq; eq.gain.value = HRTF_COMP.peakGain; eq.Q.value = HRTF_COMP.peakQ;
-      const shelf = ctx.createBiquadFilter(); shelf.type = 'lowshelf'; shelf.frequency.value = HRTF_COMP.shelfFreq; shelf.gain.value = HRTF_COMP.shelfGain;
-      this.place(p, origin, false); g.connect(shelf); shelf.connect(eq); eq.connect(p); p.connect(this.bus[bus]); v.panner = p; v.eq = eq; v.shelf = shelf;
+      const shelf = ctx.createBiquadFilter(); shelf.type = 'lowshelf'; shelf.frequency.value = HRTF_COMP.shelfFreq;
+      const eq = ctx.createBiquadFilter(); eq.type = 'peaking'; eq.frequency.value = HRTF_COMP.peakFreq; eq.Q.value = HRTF_COMP.peakQ;
+      const hf = ctx.createBiquadFilter(); hf.type = 'peaking'; hf.frequency.value = HRTF_COMP.hfFreq; hf.Q.value = HRTF_COMP.hfQ;
+      g.connect(shelf); shelf.connect(eq); eq.connect(hf); hf.connect(p); p.connect(this.bus[bus]); v.panner = p; v.eq = eq; v.shelf = shelf; v.hf = hf;
+      this.place(v, origin, false); this.counters.spatial++;
     } else g.connect(this.bus[bus]);
     this.voices.add(v); this.counters.created++;
     if (this.voices.size > MAX_VOICES) { let oldest = null; for (const x of this.voices) if (!x.loop && (!oldest || x.born < oldest.born)) oldest = x; if (oldest) this.kill(oldest); }
     return v;
   }
-  place(p, origin, smooth = true) {
-    const t = this.ctx.currentTime;
+  // HRTF compensation for a source at `origin`: blend of the HRTF_COMP hemisphere entries weighted by the direction's
+  // components in the listener's frame (front/back by the forward component, side by |right|, above/below by the up
+  // component), normalized so an axis-aligned source gets exactly its entry. Returns [shelf dB, 1 kHz dB, 3.3 kHz dB, broadband dB].
+  dirComp(origin) {
+    const C = HRTF_COMP, L = this.listenerPos, A = this.listenerAxes;
+    const dx = origin[0] - L[0], dy = origin[1] - L[1], dz = origin[2] - L[2]; const d = Math.hypot(dx, dy, dz);
+    if (d < 1) return C.front;
+    const f = (dx * A.forward[0] + dy * A.forward[1] + dz * A.forward[2]) / d, r = Math.abs(dx * A.right[0] + dy * A.right[1] + dz * A.right[2]) / d, u = (dx * A.up[0] + dy * A.up[1] + dz * A.up[2]) / d;
+    const w = [[C.front, Math.max(0, f)], [C.back, Math.max(0, -f)], [C.side, r], [C.above, Math.max(0, u)], [C.below, Math.max(0, -u)]];
+    const sum = w.reduce((s, [, k]) => s + k, 0) || 1;
+    return [0, 1, 2, 3].map((i) => w.reduce((s, [e, k]) => s + e[i] * k, 0) / sum);
+  }
+  // Move a spatial voice: panner position plus the direction-dependent compensation (smooth = loops that follow a moving source).
+  place(v, origin, smooth = true) {
+    const p = v.panner, t = this.ctx.currentTime;
     if (p.positionX) {
       if (smooth) { p.positionX.setTargetAtTime(origin[0], t, 0.02); p.positionY.setTargetAtTime(origin[1], t, 0.02); p.positionZ.setTargetAtTime(origin[2], t, 0.02); }
       else { p.positionX.setValueAtTime(origin[0], t); p.positionY.setValueAtTime(origin[1], t); p.positionZ.setValueAtTime(origin[2], t); }
     } else p.setPosition(origin[0], origin[1], origin[2]);
+    const [shelf, peak, hf, bb] = this.dirComp(origin); const gain = v.baseGain * Math.pow(10, bb / 20);
+    if (smooth) { v.shelf.gain.setTargetAtTime(shelf, t, 0.02); v.eq.gain.setTargetAtTime(peak, t, 0.02); v.hf.gain.setTargetAtTime(hf, t, 0.02); v.in.gain.setTargetAtTime(gain, t, 0.02); }
+    else { v.shelf.gain.value = shelf; v.eq.gain.value = peak; v.hf.gain.value = hf; v.in.gain.value = gain; }
   }
   kill(v) {
     if (v.dead) return; v.dead = true;
-    try { v.in.disconnect(); if (v.shelf) v.shelf.disconnect(); if (v.eq) v.eq.disconnect(); if (v.panner) v.panner.disconnect(); } catch {}
+    try { v.in.disconnect(); if (v.shelf) v.shelf.disconnect(); if (v.eq) v.eq.disconnect(); if (v.hf) v.hf.disconnect(); if (v.panner) v.panner.disconnect(); } catch {}
     this.voices.delete(v); this.counters.killed++;
   }
   // Register a scheduled source on a voice: the voice dies when its last source ends (onended) or, failing that, when update() sees v.end passed.
@@ -304,7 +342,7 @@ export class AudioEngine {
       this.lgLoops.set(id, l);
     }
     l.last = t;
-    if (l.v.panner && origin) this.place(l.v.panner, origin);
+    if (l.v.panner && origin) this.place(l.v, origin);
     return l.v;
   }
   // Rocket in flight: rumbling hiss loop following the projectile, pitch-shifted by radial velocity (doppler).
@@ -407,8 +445,8 @@ export class AudioEngine {
     return v;
   }
   // Pain in four tiers by remaining health (Q3 pain100/75/50/25): light (>= 75), mid (50-74), heavy (25-49), critical (< 25):
-  // lower, longer and shakier as health drops.
-  pain(origin, local, health) {
+  // lower, longer and shakier as health drops. `id` is the grunting player (unused here; read by the live audit's instrumentation).
+  pain(origin, local, health, id) {
     const tier = health < 25 ? 3 : health < 50 ? 2 : health < 75 ? 1 : 0;
     const v = this.voice(this.bodyBus(local), origin, { local, gain: [T.painLight, T.painMid, T.painHeavy, T.painCritical][tier] }); const t = this.now();
     if (tier === 0) this.grunt(v, t, t + 0.18, { f0: 250, f1: 190, formants: [700, 1200, 2600], formantsEnd: [550, 950, 2300], peak: 1, attack: 0.01, breath: 0.25 });
@@ -589,15 +627,23 @@ export class AudioEngine {
   cue(name, o = {}) { const f = this.cues[name]; if (!f) throw new Error('unknown cue ' + name); return f(o); }
 
   // ---------- event routing (payloads from shared/game.js) ----------
+  // Position of player `id` for a cue that carries none: interpolated remote entity, else the local game state, else the
+  // newest snapshot (events of a snapshot are dispatched before its players are interpolated into cg.remote, so the first
+  // snapshot after joining reaches here), else the last origin seen in any event.
   originOf(id, cg) {
     const r = cg.remote && cg.remote.get(id); if (r && r.origin) return r.origin;
     const p = cg.game && cg.game.players && cg.game.players.get(id); if (p) return p.ps.origin;
-    return null;
+    const snap = cg.snapshots && cg.snapshots[cg.snapshots.length - 1]; const sp = snap && snap.players && snap.players.find((x) => x.id === id); if (sp && sp.o) return sp.o;
+    return this.lastOrigin.get(id) || null;
   }
   event(e, cg, predicted) {
     if (!this.enabled) return;
     const local = e.id === cg.localId;
     const origin = e.origin || (e.id ? this.originOf(e.id, cg) : null);
+    // Body cues of another player are only ever voiced spatially: if the player cannot be placed (not in cg.remote yet, and
+    // never seen in an event) the cue is dropped rather than played non-spatially at own-cue level (a phantom "step behind
+    // you" on top of you). Otherwise remember where the player was for the next event that carries no origin.
+    if (!local && e.id) { if (!origin) { if (BODY_EVENTS.has(e.type)) { this.counters.dropped++; return; } } else this.lastOrigin.set(e.id, origin); }
     switch (e.type) {
       case EV.FIRE: if (e.weapon === WEAPONS.LIGHTNING) this.lgStart(e.id, origin, local); else this.fire(e.weapon, origin, local); break;
       case EV.EXPLODE: this.explode(e.weapon, e.origin); break;
@@ -605,7 +651,9 @@ export class AudioEngine {
       case EV.LG_HIT: this.lgHit(e.origin); break;
       case EV.HIT: if (local) this.queueHit(e); break;
       case EV.PAIN: this.queuePain(e, origin, local); break;
-      case EV.DEATH: this.death(origin, local, e.gib); break;
+      // the lethal hit's PAIN arrives in the same tick as the DEATH: the death cry replaces the grunt (Q3 plays no pain sound on
+      // a kill), and the pain window is reset so the freshly spawned player grunts at once when hit
+      case EV.DEATH: this.pendingPain.delete(e.id); this.painDebounce.delete(e.id); this.death(origin, local, e.gib); break;
       case EV.JUMP: this.jump(origin, local); break;
       case EV.LAND: this.land(origin, local, !!e.hard); break;
       case EV.FOOTSTEP: {
@@ -616,7 +664,8 @@ export class AudioEngine {
       case EV.PICKUP: this.pickup(e.itemType, e.origin || origin, local); break;
       case EV.ITEM_RESPAWN: this.itemRespawn(e.itemType, e.origin); break;
       case EV.JUMPPAD: this.jumppad(origin, local); break;
-      case EV.TELEPORT: case EV.RESPAWN: this.teleport(origin, local); break;
+      case EV.TELEPORT: this.teleport(origin, local); break;
+      case EV.RESPAWN: this.painDebounce.delete(e.id); this.teleport(origin, local); break;
       case EV.WEAPON_CHANGE: if (local) this.weaponChange(); break;
       case EV.NOAMMO: if (local) this.noAmmo(); break;
       case EV.COUNTDOWN: this.countdown(e.seconds); break;
@@ -626,10 +675,12 @@ export class AudioEngine {
       case EV.MAJOR_WARN: this.alert(); break;
     }
   }
-  // ---------- per-tick damage coalescing ----------
+  // ---------- per-tick damage coalescing + per-target pain debounce ----------
   // One shotgun blast / rocket splash arrives as N HIT events (attacker) and N PAIN events (target) in the same tick. They are
   // summed here and voiced once per attacker / per target: HIT -> hitTone(total damage), PAIN -> pain(final health).
   // Queues flush in update() (every frame) or, if update() is late, as soon as a queued entry is older than COALESCE_WINDOW.
+  // A flushed PAIN is then gated by PAIN_DEBOUNCE per target (see the constant): 1 s of lightning on one player is 20 ticks of
+  // hit tones for the attacker but only 2 grunts from the victim.
   queueHit(e) {
     const t = this.now(); this.flushDamage(t - COALESCE_WINDOW);
     const q = this.pendingHits.get(e.id);
@@ -644,7 +695,13 @@ export class AudioEngine {
   // Voice and drop every queued entry created at or before `before` (Infinity = everything).
   flushDamage(before = Infinity) {
     for (const [id, q] of this.pendingHits) if (q.t <= before) { this.pendingHits.delete(id); this.hitTone(q.damage); }
-    for (const [id, q] of this.pendingPain) if (q.t <= before) { this.pendingPain.delete(id); this.pain(q.origin, q.local, q.health); }
+    for (const [id, q] of this.pendingPain) if (q.t <= before) {
+      this.pendingPain.delete(id);
+      const t = this.now(), d = this.painDebounce.get(id);
+      if (d && t < d.t + PAIN_DEBOUNCE) { d.health = Math.min(d.health, q.health); continue; }   // inside the window: silent, only the pending tier escalates
+      this.painDebounce.set(id, { t, health: Infinity });
+      this.pain(q.origin, q.local, d ? Math.min(d.health, q.health) : q.health, id);
+    }
   }
 
   // Per frame: flush coalesced damage cues, garbage-collect finished voices, end lightning loops that stopped being refreshed,
@@ -662,7 +719,7 @@ export class AudioEngine {
       let l = this.rocketLoops.get(pr.id);
       if (!l) l = this.rocketLoopStart(pr.id, pr.origin, pr.v);
       if (pr.v) l.velocity = pr.v;
-      if (l.v.panner) this.place(l.v.panner, pr.origin);
+      if (l.v.panner) this.place(l.v, pr.origin);
       const dop = this.dopplerFactor(pr.origin, l.velocity);
       l.n.playbackRate.setTargetAtTime(dop, t, 0.05); l.o.frequency.setTargetAtTime(58 * dop, t, 0.05);
     }

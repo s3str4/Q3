@@ -2,19 +2,21 @@
 
 Everything the client plays is generated at runtime with the Web Audio API (`client/audio/audio.js`). There are no
 sample files and no third-party assets. The design target is the Quake 3 / CPMA standard: every cue is identifiable
-blind, enemy information is never quieter than your own feedback, the whole map is audible, and nothing ever clips.
+blind, enemy information is never quieter than your own feedback **from any direction**, the whole map is audible, and
+nothing ever clips.
 
 All numbers below are measured, not estimated: `node tools/audio_measure.mjs` renders every cue through the real engine
-(HRTF panner, buses, limiter) in an `OfflineAudioContext` inside headless Edge and asserts the rules. The latest report
-is `.evidence/audio/measure.json`; `.evidence/audio/palette.png` is a waveform + spectrogram sheet of the palette and
-`.evidence/audio/*.wav` are the rendered cues. `node tools/audio_measure.mjs --live 25` plays a real practice match
-against a bot (arena mode: full loadout; the local player aims at the bot) and samples the live engine, including a
-per-frame / per-tick audit of the damage coalescing (`.evidence/audio/live.json`).
+(HRTF panner, buses, limiter) in an `OfflineAudioContext` inside headless Edge and asserts the rules (1442 checks). The
+latest report is `.evidence/audio/measure.json`; `.evidence/audio/palette.png` is a waveform + spectrogram sheet of the
+palette, `.evidence/audio/*.wav` are the rendered cues and `.evidence/audio/hrtf.json` the raw HRTF response table.
+`node tools/audio_measure.mjs --live 25` plays a real practice match against a bot (arena mode: full loadout; the local
+player aims at the bot) and samples the live engine, including a per-frame / per-tick audit of the damage coalescing, a
+per-player audit of the pain debounce and of dropped cues (`.evidence/audio/live.json`).
 
 ## Signal chain
 
 ```
-source(s) -> voice gain -> [low shelf -3 dB @250 | peak +4 dB @1k -> HRTF panner]  (world sounds only)
+source(s) -> voice gain -> [low shelf @250 -> peak @1k -> peak @3.3k -> HRTF panner]  (world sounds only; gains by direction)
           -> category bus -> master gain -> limiter (-3 dBFS, 20:1, 1 ms / 100 ms) -> soft clipper (knee 0.6, ceiling 0.95) -> out
 ```
 
@@ -22,15 +24,15 @@ source(s) -> voice gain -> [low shelf -3 dB @250 | peak +4 dB @1k -> HRTF panner
   All bus gains are 1.0; loudness lives in the per-cue trims (`CUE_TRIM`) so the calibration is one table.
 - Every cue is a *voice*: one gain node, an optional panner chain, and N scheduled sources. A voice records when its last
   source stops; `update()` disconnects voices past that time and `onended` does the same eagerly. `stats()` reports live
-  voice/loop counts, the age of the oldest one-shot voice and created/killed counters; the measurement tool asserts the
-  count returns to zero after every cue and the live run asserts no voice ever lives longer than 3 s.
+  voice/loop counts, the age of the oldest one-shot voice and created/killed/spatial/dropped counters; the measurement tool
+  asserts the count returns to zero after every cue and the live run asserts no voice ever lives longer than 3 s.
 - Loops (lightning beam per shooter, rocket flight per projectile, ambient bed) are voices flagged `loop`; they are
   stopped explicitly with a 30-60 ms fade. The lightning loop dies 150 ms after the last FIRE event for that player.
 - Limiter: Chrome's `DynamicsCompressor` at threshold -3 dBFS, ratio 20, plus a tanh soft clipper (identity below
   -4.4 dBFS, never above -1 dBFS). Cues are trimmed so a single cue never reaches the threshold: the measured gain
-  reduction on a point-blank rocket explosion is **0.07 dB** (rule: <= 4 dB, i.e. no pumping). The "stress mix"
+  reduction on a point-blank rocket explosion is **0.05 dB** (rule: <= 4 dB, i.e. no pumping). The "stress mix"
   (explosion + shotgun + rail + heavy pain + hit tone + lightning + a second rocket fired at once) peaks at
-  **-1.27 dBFS** with 4.1 dB of reduction.
+  **-0.99 dBFS** with 4.8 dB of reduction.
 - Randomness (footstep pitch, crackle timing, ring detune) uses a seedable generator so measurements are reproducible.
 - Damage is voiced per tick, not per event. `shared/game.js` emits one `EV.HIT` (attacker) and one `EV.PAIN` (target)
   per shotgun pellet and per splash victim, so a point-blank shotgun blast arrives as 11 + 11 events in the same tick.
@@ -38,6 +40,13 @@ source(s) -> voice gain -> [low shelf -3 dB @250 | peak +4 dB @1k -> HRTF panner
   the queues once per frame (or `event()` flushes an entry older than `COALESCE_WINDOW` = 16.7 ms if a frame is late),
   playing **one** `hitTone(total damage)` and **one** pain grunt, exactly like Q3/CPMA (cost: at most one frame, 8 ms at
   120 fps, of added latency on damage feedback). See "Damage coalescing" below.
+- Pain grunts are additionally debounced per target like Q3 (`g_active.c P_DamageFeedback`: `pain_debounce_time =
+  level.time + 700`): `PAIN_DEBOUNCE` = 700 ms. The first PAIN in a window is voiced at once; later PAINs inside the window
+  are silent and only lower the health the next grunt is voiced with, so the tier still escalates (light -> heavy) on the
+  next grunt. Hit tones are **not** debounced (CPMA: one per damage tick), so a lightning beam ticks 20 times a second in
+  the attacker's ears while the victim grunts at most every 700 ms. A lethal PAIN arrives in the same tick as the DEATH:
+  the pending grunt is cancelled (the death cry replaces it, as in Q3) and DEATH / RESPAWN reset the window so a freshly
+  spawned player grunts immediately when hit. See "Pain debounce" below.
 
 ## Spatialization and attenuation
 
@@ -46,45 +55,83 @@ source(s) -> voice gain -> [low shelf -3 dB @250 | peak +4 dB @1k -> HRTF panner
   0 dB up to 320 units, **-5.5 dB at 600**, **-13.4 dB at 1500**, -19.4 dB at 3000. Measured rail fire: -5.5 dB at
   600 and -13.4 dB at 1500 relative to 300 (rule: within +-3 dB of the model).
 - Major item respawns use `refDistance = 1200` / `maxDistance = 8000` so they carry across the whole map
-  (-9.6 dBFS at 1500 units, -15.6 dBFS at 3000). Minor respawns use `refDistance = 200`, `rolloffFactor = 1.5`
-  (-38 dBFS at 1500: local only).
-- Own cues (`local`) bypass the panner and play at full level. Spatial voices get `REMOTE_GAIN = 1.35` plus an EQ that
-  flattens Chrome's frontal HRTF, which was measured with `OfflineAudioContext` probes (front / right / back, RMS
-  relative to a direct connection):
+  (-9.9 dBFS at 1500 units, -15.9 dBFS at 3000). Minor respawns use `refDistance = 200`, `rolloffFactor = 1.5`
+  (-38.6 dBFS at 1500: local only).
+- Own cues (`local`) bypass the panner and play at full level. Spatial voices get `REMOTE_GAIN = 1.35` plus a
+  **direction-aware EQ** that flattens Chrome's HRTF. The raw panner response was measured with sine tones at 100 units
+  (`node tools/audio_measure.mjs --hrtf`, L / R RMS in dB relative to a direct connection, listener looking down +X):
 
-  | Hz | front | right ear L / R | ILD right | back |
+  | Hz | front | back | left (L / R) | above | below |
+  |---|---|---|---|---|---|
+  | 125 | +3.2 | +0.6 | +3.2 / +1.2 | +2.5 | +1.9 |
+  | 250 | +3.4 | +1.4 | +4.2 / +1.7 | +2.4 | +0.2 |
+  | 500 | -1.8 | +0.2 | +4.0 / -1.3 | -2.2 | -0.2 |
+  | 700 | -1.5 | -1.3 | +3.3 / -2.3 | -6.4 | -1.2 |
+  | 1000 | -5.3 | -1.5 | +1.7 / -4.9 | -5.2 | -1.3 |
+  | 1400 | -4.9 | -3.7 | -0.6 / -6.9 | -3.2 | -1.5 |
+  | 2000 | +0.1 | -3.5 | -2.2 / -7.8 | -5.9 | -3.3 |
+  | 2500 | -1.8 | -4.7 | -1.3 / -11.4 | -5.5 | -3.7 |
+  | 3000 | -3.6 | -5.4 | -0.6 / -12.7 | -5.3 | -4.0 |
+  | 3500 | -1.4 | -6.0 | -0.9 / -15.3 | -5.4 | -4.3 |
+  | 4000 | -0.3 | -6.8 | -1.5 / -19.2 | -4.9 | -5.1 |
+  | 5000 | -2.7 | -8.8 | +1.4 / -25.5 | -6.4 | -9.7 |
+  | 6000 | -7.6 | -10.2 | +2.3 / -25.1 | -4.7 | -17.5 |
+  | 8000 | -11.9 | -14.0 | -3.2 / -23.7 | -4.3 | -3.0 |
+
+  Relative to the front, a source behind / above / below the listener loses another **4-6 dB in the 2-5 kHz band**, which
+  is exactly where the locating cues live (footstep tap 3.2-4.5 kHz, machinegun crack, rail ring). Uncompensated, an enemy
+  footstep 100 units behind you measured -17.4 dBFS against -14.1 for your own step (3.3 dB quieter); from the side the
+  near ear is flat and the far ear gives 12-25 dB of interaural difference at 3-8 kHz.
+- `HRTF_COMP` therefore holds one EQ setting per hemisphere, `[low shelf dB @250, peak dB @1k (Q 0.8), peak dB @3.3k (Q 0.55), broadband dB]`:
+
+  | direction | shelf | 1 kHz | 3.3 kHz | why |
   |---|---|---|---|---|
-  | 150 | +3.8 | +1.9 / +4.0 | 2.1 | +1.5 |
-  | 300 | +2.6 | +0.9 / +3.7 | 2.8 | +0.3 |
-  | 600 | -2.0 | -2.0 / +4.0 | 5.9 | -0.9 |
-  | 1000 | -5.3 | -4.9 / +1.7 | 6.6 | -1.5 |
-  | 2000 | +0.1 | -7.9 / -2.2 | 5.7 | -3.5 |
-  | 3000 | -3.6 | -12.7 / -0.6 | 12.0 | -5.4 |
-  | 4000 | -0.3 | -19.2 / -1.5 | 17.7 | -6.8 |
-  | 8000 | -11.9 | -23.7 / -3.2 | 20.4 | -14.0 |
+  | front | -3 | +4 | 0 | +3 dB bass hump, -5 dB dip at 1 kHz |
+  | back | -0.5 | +1.5 | +7.5 | no bass hump, no 1 kHz dip, 2-5 kHz loss |
+  | side | -3 | 0 | +0.5 | near ear is flat |
+  | above | -2.5 | +4 | +5.5 | 700 Hz-1 kHz dip and 2-5 kHz loss |
+  | below | -2 | +0.5 | +6.5 | 2-5 kHz loss, deep 6 kHz notch |
 
-  Consequences baked into the design: a -3 dB low shelf at 250 Hz and a +4 dB peak at 1 kHz on spatial voices (so
-  enemy rockets are not 6 dB louder than yours while enemy plasma is quieter), and footsteps carry their locating
-  energy at 3-4.5 kHz where the interaural difference is 12-18 dB. Measured enemy footstep at 600 units to the
-  right: L -25.7 / R -17.0 dBFS (8.6 dB ILD; rule >= 6 dB), peak -19.2 dBFS straight ahead (rule >= -30 dBFS).
+  `dirComp(origin)` blends the five entries by the source direction in the listener's frame (front/back by the forward
+  component, side by |right|, above/below by the up component, normalized so an axis-aligned source gets exactly its
+  entry; diagonals get the mix). One-shot voices are set at creation; loops (lightning, rocket flight) are updated every
+  time they are re-placed. Measured result at 100 units, enemy minus own peak: footstep front +0.2 / **back +1.0** /
+  left +2.2 / above +1.0 / below +0.3; machinegun front +1.6 / back +2.9 / below +3.2; every dual cue is >= own - 0.5 dB
+  in all six directions and no direction is more than 4 dB louder than the front (full table below). Footstep 100 u behind:
+  **-13.1 dBFS** (was -17.4; rule >= -14.6), machinegun 100 u behind **-4.4 dBFS** (was -8.9; rule >= -7.8).
+- Enemy footstep at 600 units to the right: L -26.2 / R -17.4 dBFS (8.8 dB ILD; rule >= 6 dB), peak -19.4 dBFS straight
+  ahead, -18.5 behind, -18.5 above, -19.2 below (rule >= -30 dBFS).
 - Rocket flight loops are pitch-shifted by radial velocity (`SPEED_OF_SOUND = 3000` ups, factor clamped 0.6-1.6):
   a 900 ups rocket coming at you plays ~1.3x, going away ~0.77x.
+
+## Origin resolution for body cues
+
+Enemy JUMP / LAND / FOOTSTEP events carry no origin (they come from pmove); PAIN / DEATH / PICKUP / RESPAWN / JUMPPAD /
+TELEPORT / FIRE carry one. For a remote player `originOf(id, cg)` tries, in order: the interpolated entity in
+`cg.remote`, the local game state, the newest snapshot's player entry (a snapshot's events are dispatched before its
+players are interpolated into `cg.remote`, so the join sequence lands here), and the last origin seen for that id in any
+event. A remote body cue whose position still cannot be resolved is **dropped** (`counters.dropped`) instead of being voiced
+non-spatially at own-cue level, which is what used to happen (a phantom step on top of you). Measured through the real
+`event()` path: `EV.FOOTSTEP id 2` with an empty `cg.remote` -> 0 voices, dropped 1; with the player in `cg.remote` at
+600 u -> 1 spatial voice at -19.4 dBFS (identical to the enemy@600 render); after a PAIN with an origin and the player gone
+from `cg.remote` -> spatial at that last origin. In the live run 0 of 369 voices were dropped (the join used to drop 7
+before the snapshot fallback existed); the live audit fails if any cue is dropped for a player present in `cg.remote`.
 
 ## Palette
 
 | Cue | Recipe | Identity |
 |---|---|---|
-| Machinegun | 12 ms highpass crack + 50 ms 1.5 kHz body + 220->80 Hz thump through tanh drive | tight tick, < 80 ms so 10 Hz fire stays crisp |
-| Shotgun | 3.8 kHz->140 Hz lowpass noise blast (drive 3) + 130->42 Hz boom, two-click pump at +380/+500 ms | wide blast, then the pump |
-| Rocket fire | 95->36 Hz sine + 62 Hz triangle through drive, ignition crack, 450->2400 Hz whoosh with 50 ms attack | deep thump then rising whoosh |
+| Machinegun | 12 ms highpass crack + 65 ms saturated 1.7 kHz body + 900 Hz layer + 200->90 Hz thump | tight tick, < 90 ms so 10 Hz fire stays crisp |
+| Shotgun | saturated 1.3 kHz->350 Hz bandpass blast (drive 3) + 120->42 Hz boom + 900->200 Hz lowpass, two-click pump at +240/+310 ms | wide blast, then the pump |
+| Rocket fire | ignition crack, saturated 500->2600 Hz rising whoosh (the identity), 95->36 Hz sine + 62 Hz triangle thump underneath | deep thump then rising whoosh |
 | Rocket flight | bandpass 420 Hz noise wobbled at 17 Hz + 58 Hz sawtooth, spatialized, doppler | rumbling hiss following the missile |
 | Rocket explosion | 66->28 Hz sine + 44 Hz triangle (drive 3), 2.5 kHz crack, 3 kHz->90 Hz body, 10 random crackle bursts, 1.5 s 350->70 Hz tail | sub impact, crackle, tail |
-| Rail | 320->2800 Hz sawtooth charge whine (90 ms), crack, 1.3 kHz->250 Hz body, 130->48 Hz thump, 4 inharmonic ring partials (1180/1770/2650/3540 Hz, 0.55-0.9 s) | whine, crack, long ring |
+| Rail | 320->2800 Hz sawtooth charge whine (90 ms), crack, 1.8 kHz->500 Hz body, 130->48 Hz thump, 4 inharmonic ring partials (1180/1770/2650/3540 Hz, 0.5-0.8 s) | whine, crack, long ring |
 | Lightning | 62 Hz sawtooth through a 9 Hz swept bandpass + 1350 Hz square with noise FM + highpass crackle gated at 41 Hz; hit: 4.5 kHz sizzle + 3200->1400 Hz chirp | continuous buzz with crackle |
-| Plasma | 1150->320 Hz sine bloop (80 ms) + 580->200 Hz square + 4.5 kHz tick | rapid bloops |
-| Gauntlet | 110->170 Hz sawtooth with 38 Hz vibrato + 440->660 Hz square + 3.2 kHz whir; world hit: 1400/2130 Hz clank | motor spin-up |
+| Plasma | 1150->330 Hz sine bloop (85 ms) + 580->220 Hz square + 4.5 kHz tick | rapid bloops |
+| Gauntlet | saturated 550->800 Hz sawtooth whine with 38 Hz vibrato + 140 Hz sawtooth body + 3.2 kHz whir; world hit: 1400/2130 Hz clank | motor spin-up |
 | Jump | formant grunt "hup" (200->150 Hz through 650/1150/2500 Hz -> 500/900/2300 Hz) | vocal, short |
-| Land | soft: 60 ms 900->90 Hz thud + 120->45 Hz sine; hard: 160 ms thud + "oof" grunt (150->95 Hz) | soft vs hard clearly different |
+| Land | soft: 70 ms 900->90 Hz thud + 120->45 Hz sine; hard: 160 ms thud + "oof" grunt (150->95 Hz) | soft vs hard clearly different |
 | Footstep | 18 ms 3.2-4.5 kHz tap + 1.8 kHz click + quiet 500 Hz heel thud + 150-200->70 Hz sine, pitch randomized | bright tap, located |
 | Pain x4 (Q3 pain100/75/50/25) | light (health >= 75): 180 ms, 250->190 Hz; mid (50-74): 260 ms, 228->165 Hz; heavy (25-49): 340 ms, 205->130 Hz with 16 Hz tremolo; critical (< 25): 480 ms, 165->95 Hz with 22 Hz tremolo | lower, longer and shakier as health drops |
 | Death / gib | death: 750 ms groan 190->65 Hz with 12 Hz vibrato + body thud at 550 ms; gib: bubbling 1.1 kHz->180 Hz lowpass noise (drive), 90->40 Hz sine, 8 wet pops, short grunt | groan vs splat |
@@ -102,27 +149,44 @@ source(s) -> voice gain -> [low shelf -3 dB @250 | peak +4 dB @1k -> HRTF panner
 | Win / lose / overtime | rising C-E-G-C triangle arpeggio + chord / falling G-F-Eb-C detuned; overtime alert: two 520 Hz squares | |
 | Ambient | lowpass 160 Hz noise + 48 Hz drone with 0.08 Hz LFO, **-40.1 dBFS RMS** | bed only |
 
-## Loudness rules (asserted by `tools/audio_measure.mjs`, 462 checks, all passing)
+## Loudness rules (asserted by `tools/audio_measure.mjs`, 1442 checks, all passing)
 
-1. No clipping: every render peaks <= -0.5 dBFS; stress mix <= -0.3 dBFS.
-2. Limiter never pumps: rocket explosion gain reduction <= 4 dB (measured 0.07 dB).
+1. No clipping: every render (including all directional variants) peaks <= -0.5 dBFS; stress mix <= -0.3 dBFS.
+2. Limiter never pumps: rocket explosion gain reduction <= 4 dB (measured 0.05 dB).
 3. Weapon fire consistency: the seven weapon fire cues peak within +-3 dB of their median, for own cues and for enemy
-   cues at each distance (own: -5.9 to -8.2 dBFS; enemy at 0: -3.5 to -5.8 dBFS).
-4. Enemy >= own: for every cue with both variants the enemy version at point blank is never more than 0.5 dB below the
-   own version (measured minimum delta +0.2 dB, most are +1 to +5 dB).
-5. Enemy footsteps: >= -30 dBFS at 600 units (measured -19.2) and >= 6 dB interaural difference from the side (8.6).
-6. Major respawns map-wide (>= -24 dBFS at 1500, >= -30 at 3000; measured -9.6 / -15.6); minors >= 10 dB under majors
+   cues at each distance (own: -6.9 to -8.1 dBFS; enemy at 0: -4.5 to -5.9 dBFS), and their A-weighted momentary levels
+   agree within +-3 dB (own -15.0 to -16.8 dB(A)); MG/RG/SG/PG carry < 50 % of their energy below 300 Hz.
+4. Pre-limiter headroom: every weapon fire peaks <= -6 dBFS before the limiter, own and point blank.
+5. Enemy >= own, every direction: for every cue with both variants the enemy version is never more than 0.5 dB below
+   the own version at point blank straight ahead **and** at 100 units in the six directions front / back / left / right /
+   above / below; at 600 units in the same six directions it is >= own + model (-5.46 dB) - 0.5. Measured minimum
+   delta over all 144 directional renders: +0.19 dB (footstep, front). Explicit targets: footstep 100 u behind
+   >= -14.6 dBFS (measured -13.07), machinegun 100 u behind >= -7.8 dBFS (measured -4.35).
+6. Directional overshoot: no direction is more than 4 dB louder than the same cue straight ahead (max measured +3.6 dB,
+   rail from below) so a cue keeps one loudness whichever way the listener faces.
+7. Enemy footsteps: >= -30 dBFS at 600 units (measured -19.4) and >= 6 dB interaural difference from the side (8.8).
+8. Major respawns map-wide (>= -24 dBFS at 1500, >= -30 at 3000; measured -9.9 / -15.9); minors >= 10 dB under majors
    at 1500 (measured 28.7 dB under).
-7. Ambient <= -36 dBFS RMS and >= 12 dB under the quietest weapon at 1500 units (measured -40.1 vs -19.2).
-8. Inverse distance model holds (+-3 dB) at 600 and 1500 units.
-9. No zombie nodes: after every cue voices == 0, loops == 0 and created == killed; live run: no one-shot voice older
-   than 3 s, `created == killed + live`.
-10. Durations per cue within their budget (machinegun <= 120 ms, footstep <= 100 ms, hit tone <= 100 ms, explosion <= 2 s...).
-11. Damage coalescing (raw game events through `event()` + the per-frame `update()`): 11 HIT(10) in one frame -> exactly
+9. Ambient <= -36 dBFS RMS and >= 12 dB under the quietest weapon at 1500 units (measured -40.1 vs -19.3).
+10. Inverse distance model holds (+-3 dB) at 600 and 1500 units.
+11. No zombie nodes: after every cue voices == 0, loops == 0 and created == killed; live run: no one-shot voice older
+    than 3 s, `created == killed + live`.
+12. Durations per cue within their budget (machinegun <= 120 ms, footstep <= 100 ms, hit tone <= 100 ms, explosion <= 2 s...).
+13. Damage coalescing (raw game events through `event()` + the per-frame `update()`): 11 HIT(10) in one frame -> exactly
     1 voice; 11 HIT + 11 PAIN -> exactly 2 voices; the same 11 HIT in two frames 50 ms apart -> 2 voices; the coalesced
     tone is tier 4 (dominant 1300 Hz, and its 1300 Hz partial sits at the same level under the grunt as alone, >= 6 dB over
     the tier-0 620 Hz band); pre-limiter peak <= -8 dBFS; post-limiter peak within +-1 dB of a single hitTone4 (tone
     alone) or of the louder single cue (tone + grunt).
+14. Origin resolution: an unresolvable remote footstep creates 0 voices (dropped 1); a resolvable one creates exactly one
+    spatial voice at the enemy@600 level; a player known only from an earlier event is voiced at that last origin.
+15. Pain debounce (raw events through `event()` + a 120 fps `update()` clock): 20 x PAIN(8) on enemy id 2 (100 u ahead) at
+    50 ms spacing over 1 s -> exactly 2 grunts, the second 0.70 s (+-0.02) after the first, never more than one grunt alive
+    at once, post-limiter peak within +-1 dB of a single enemy painLight at 100 u; the same stream for the local player
+    (id 1) -> 2 grunts at own painLight level; health 95 -> 0 by 5 per tick -> the second grunt carries the lowest pending
+    health (25, heavy tier); lethal PAIN + DEATH in one tick -> 1 voice (death cry), 0 grunts; PAIN, DEATH, RESPAWN + PAIN
+    within 0.5 s -> 2 grunts (window reset); the full LG exchange (FIRE + PAIN + HIT + LG_HIT x 20) -> 20 hit tones and 2
+    grunts for the attacker, 2 grunts for the victim. Live: per player `grunts <= ceil(span / 0.7) + 1` and within +-1 of
+    what a 700 ms debounce on the PAIN arrival times predicts.
 
 ## Damage coalescing (measured)
 
@@ -135,11 +199,29 @@ What the client hears for one full point-blank shotgun blast (11 pellets, 110 da
 | 11 x HIT + 11 x PAIN coalesced -> tone + one light grunt at 100 u | 2 | 725 (grunt formant) | -30.28 dB | -9.78 | -8.07 (louder single cue, enemy painLight: -8.93) |
 | 11 x HIT in frame A + 11 x HIT in frame B (+50 ms) | 2 | | | | |
 
-Live (`node tools/audio_measure.mjs --live 40`, arena mode so the full arsenal is available, the local player aims at the
-bot and switches to the shotgun inside 900 units): 50 local shotgun HIT events arrived in 6 bursts of 2/7/8/11/11/11
-pellets and exactly **6 hit tones** were voiced (one per blast that hit); 69 PAIN events in 69 ticks -> 69 grunts. The live
-audit asserts `hitFrames <= hitTones <= hitBursts` (one tone per frame or per tick, never per pellet) and the same for
-pain grunts.
+## Pain debounce (measured)
+
+What the listener hears during 1 s of lightning on one player (20 damage ticks 50 ms apart), offline through the real
+engine with `update()` on a 120 fps clock (`.evidence/audio/pain_lg_debounced.wav`, `lg_exchange.wav`):
+
+| stream (20 ticks in 1 s) | grunts | grunt times (s) | max grunts alive | pre-limiter peak | post-limiter peak |
+|---|---|---|---|---|---|
+| 20 x PAIN(8) on enemy at 100 u, per-event voicing (old behaviour) | 20 | every 0.05 | 11 | **+13.83 dBFS** (20 stacked grunts) | -4.33 |
+| 20 x PAIN(8) on enemy at 100 u, debounced | **2** | 0.00, 0.70 | **1** | -10.64 | **-8.93** (single enemy painLight at 100 u: -8.93) |
+| 20 x PAIN(8) on the local player, debounced | 2 | 0.00, 0.70 | 1 | | -11.06 (single own painLight: -11.06) |
+| 20 x PAIN(5) health 95 -> 0 (tier escalation) | 2 | 0.00 (health 95, light), 0.70 (health 25, heavy) | 1 | | |
+| lethal PAIN + DEATH in one tick | 0 (+ 1 death cry) | | | | |
+| PAIN, DEATH at 0.3 s, RESPAWN + PAIN at 0.5 s | 2 | 0.00, 0.50 (window reset by the death) | 1 | | |
+| LG exchange, attacker: own FIRE + PAIN + HIT + LG_HIT x 20 | 2 | 0.00, 0.70 | 1 | | -3.22 with **20 hit tones** (one per tick), 6 voices at most (was 61 voices, 16 at once, -2.35) |
+| LG exchange, victim: enemy FIRE + own PAIN + LG_HIT x 20 | 2 | 0.00, 0.70 | 1 | | -3.83, 4 voices at most (was 41 voices, 14 at once, -2.26) |
+
+Live (`node tools/audio_measure.mjs --live 25 --port 27983`, arena mode, the local player aims at the bot and switches
+to the shotgun inside 900 units): context `running` at 48 kHz (base latency 10 ms), 19 voices at most, oldest one-shot
+voice 1.27 s, final created 362 = killed 357 + 5 live (262 of them spatial), 1 loop (the bot's lightning beam during the
+idle window), dropped 0; 40 local shotgun HIT events in 5 bursts (up to 11 per frame) -> exactly **5 hit tones**; PAIN
+per player: bot 52 events over 18.75 s -> **7 grunts** (a 700 ms debounce on the arrival times predicts 7; cap 28), local
+player 40 events over 11.62 s -> **3 grunts** (predicted 4, +-1; cap 18); events heard: FIRE 117, HIT 92, PAIN 92,
+FOOTSTEP 89, JUMP 10, LAND 12, LG_HIT 103, BULLET_IMPACT 82, WEAPON_CHANGE 23, DEATH 2, RESPAWN 6, EXPLODE 2.
 
 ## Measured table (peak dBFS at the listener, master volume 1.0)
 
@@ -148,39 +230,39 @@ pain grunts.
 
 | Cue | own @0 | enemy @0 | @300 | @600 | @1500 | dur (s) | RMS own/enemy@0 |
 |---|---|---|---|---|---|---|---|
-| machinegunFire | -7.8 | -3.9 | -3.9 | -9.3 | -17.3 | 0.047 | -19.9 / -16.1 |
-| shotgunFire | -7.7 | -4.0 | -4.0 | -9.4 | -17.4 | 0.531 | -24.9 / -22.5 |
-| rocketFire | -7.7 | -4.0 | -4.0 | -9.4 | -17.4 | 0.372 | -20.8 / -20.1 |
-| railFire | -7.5 | -4.1 | -4.1 | -9.6 | -17.5 | 0.761 | -27.4 / -25.3 |
-| plasmaFire | -6.0 | -5.6 | -5.6 | -11.1 | -19.0 | 0.066 | -21.1 / -20.2 |
-| gauntletFire | -8.2 | -3.5 | -3.5 | -8.9 | -16.9 | 0.175 | -23.7 / -21.0 |
-| lightningLoop | -5.9 | -5.8 | -5.8 | -11.2 | -19.2 | 0.639 | -19.1 / -18.8 |
-| rocketLoop | - | -13.6 | -13.6 | -19.1 | -27.1 | 0.629 | - / -25.9 |
-| rocketExplode | - | -2.7 | -2.7 | -8.1 | -16.1 | 0.83 | - / -21.9 |
-| plasmaExplode | - | -11.7 | -11.7 | -17.1 | -25.1 | 0.048 | - / -27.5 |
-| bulletImpact | - | -15.7 | -15.7 | -21.1 | -29.1 | 0.024 | - / -32.4 |
-| railImpact | - | -9.6 | -9.6 | -15.1 | -23.1 | 0.22 | - / -29.6 |
-| gauntletImpact | - | -13.7 | -13.7 | -19.1 | -27.1 | 0.087 | - / -29.6 |
-| lgHit | - | -13.7 | -13.7 | -19.1 | -27.1 | 0.043 | - / -30.2 |
-| jump | -14.8 | -12.9 | -12.9 | -18.3 | -26.3 | 0.103 | -32.5 / -30.3 |
-| landSoft | -17.8 | -13.8 | -13.8 | -19.3 | -27.2 | 0.056 | -27.7 / -25.8 |
-| landHard | -12.2 | -7.5 | -7.5 | -12.9 | -20.9 | 0.156 | -23.8 / -23.5 |
-| footstep | -13.9 | -13.8 | -13.8 | -19.2 | -27.2 | 0.026 | -30.6 / -29.0 |
+| machinegunFire | -7.3 | -5.7 | -5.7 | -11.2 | -19.1 | 0.062 | -18.1 / -16.4 |
+| shotgunFire | -8.1 | -4.9 | -4.9 | -10.4 | -18.3 | 0.342 | -20.8 / -18.9 |
+| rocketFire | -7.9 | -5.1 | -5.1 | -10.6 | -18.5 | 0.38 | -19.9 / -18.0 |
+| railFire | -7.1 | -5.9 | -5.9 | -11.4 | -19.3 | 0.756 | -19.5 / -18.8 |
+| plasmaFire | -8.1 | -4.9 | -4.9 | -10.3 | -18.3 | 0.078 | -17.5 / -14.1 |
+| gauntletFire | -6.9 | -4.5 | -4.5 | -10.0 | -18.0 | 0.19 | -17.1 / -14.4 |
+| lightningLoop | -7.2 | -5.3 | -5.3 | -10.8 | -18.7 | 0.64 | -16.2 / -17.0 |
+| rocketLoop | - | -14.0 | -14.0 | -19.4 | -27.4 | 0.629 | - / -26.3 |
+| rocketExplode | - | -3.0 | -3.0 | -8.4 | -16.4 | 0.83 | - / -22.2 |
+| plasmaExplode | - | -12.0 | -12.0 | -17.5 | -25.4 | 0.048 | - / -27.8 |
+| bulletImpact | - | -16.0 | -16.0 | -21.4 | -29.4 | 0.024 | - / -32.7 |
+| railImpact | - | -10.0 | -10.0 | -15.5 | -23.4 | 0.218 | - / -29.9 |
+| gauntletImpact | - | -14.0 | -14.0 | -19.5 | -27.4 | 0.085 | - / -29.8 |
+| lgHit | - | -14.0 | -14.0 | -19.5 | -27.4 | 0.043 | - / -30.5 |
+| jump | -15.0 | -13.0 | -13.0 | -18.5 | -26.4 | 0.103 | -32.7 / -30.4 |
+| landSoft | -18.0 | -14.0 | -14.0 | -19.4 | -27.4 | 0.056 | -27.9 / -25.9 |
+| landHard | -12.4 | -7.7 | -7.7 | -13.1 | -21.1 | 0.156 | -23.9 / -23.5 |
+| footstep | -14.1 | -13.9 | -13.9 | -19.4 | -27.3 | 0.026 | -30.8 / -29.1 |
 | painLight | -11.1 | -8.9 | -8.9 | -14.4 | -22.4 | 0.142 | -29.6 / -26.6 |
 | painMid | -10.8 | -8.3 | -8.3 | -13.7 | -21.7 | 0.206 | -28.6 / -25.7 |
 | painHeavy | -10.6 | -7.5 | -7.5 | -12.9 | -20.9 | 0.266 | -28.9 / -26.3 |
-| painCritical | -9.4 | -6.7 | -6.7 | -12.1 | -20.1 | 0.378 | -29.2 / -26.9 |
-| death | -8.2 | -7.5 | -7.5 | -12.9 | -20.9 | 0.678 | -26.9 / -25.4 |
-| gib | -8.9 | -2.9 | -2.9 | -8.3 | -16.2 | 0.359 | -21.3 / -20.4 |
-| pickupHealth | -13.0 | -10.6 | -10.6 | -16.1 | -24.0 | 0.177 | -27.4 / -25.3 |
-| pickupMega | -10.9 | -8.7 | -8.7 | -14.2 | -22.1 | 0.605 | -26.1 / -23.3 |
-| pickupArmor | -12.6 | -11.1 | -11.1 | -16.6 | -24.5 | 0.278 | -29.9 / -27.4 |
-| pickupWeapon | -12.9 | -8.8 | -8.8 | -14.2 | -22.2 | 0.215 | -26.7 / -22.7 |
-| pickupAmmo | -14.4 | -13.3 | -13.3 | -18.8 | -26.7 | 0.105 | -31.8 / -31.0 |
-| respawnMajor | - | -7.7 | -7.7 | -7.7 | -9.6 / -15.6 @3000 | 0.833 | - / -22.3 |
-| respawnMinor | - | -17.6 | -22.5 | -29.7 | -38.3 / -44.5 @3000 | 0.062 | - / -29.6 |
-| jumppad | -10.6 | -9.0 | -9.0 | -14.5 | -22.4 | 0.265 | -26.8 / -25.4 |
-| teleport | -11.5 | -8.2 | -8.2 | -13.7 | -21.6 | 0.497 | -24.4 / -21.7 |
+| painCritical | -9.3 | -6.6 | -6.6 | -12.1 | -20.1 | 0.378 | -29.2 / -26.8 |
+| death | -8.3 | -7.7 | -7.7 | -13.1 | -21.1 | 0.678 | -27.0 / -25.5 |
+| gib | -9.0 | -3.0 | -3.0 | -8.4 | -16.4 | 0.359 | -21.5 / -20.5 |
+| pickupHealth | -13.2 | -10.8 | -10.8 | -16.3 | -24.2 | 0.177 | -27.6 / -25.5 |
+| pickupMega | -11.1 | -8.9 | -8.9 | -14.3 | -22.3 | 0.604 | -26.3 / -23.4 |
+| pickupArmor | -12.7 | -11.3 | -11.3 | -16.7 | -24.7 | 0.278 | -30.1 / -27.5 |
+| pickupWeapon | -13.1 | -8.9 | -8.9 | -14.4 | -22.4 | 0.215 | -26.9 / -22.9 |
+| pickupAmmo | -14.5 | -13.4 | -13.4 | -18.9 | -26.9 | 0.105 | -31.9 / -31.2 |
+| respawnMajor | - | -8.0 | -8.0 | -8.0 | -9.9 / -15.9 @3000 | 0.832 | - / -22.6 |
+| respawnMinor | - | -18.0 | -22.8 | -30.0 | -38.6 / -44.8 @3000 | 0.062 | - / -29.9 |
+| jumppad | -10.8 | -9.2 | -9.2 | -14.7 | -22.6 | 0.261 | -26.9 / -25.6 |
+| teleport | -11.6 | -8.4 | -8.4 | -13.8 | -21.8 | 0.497 | -24.6 / -21.9 |
 | hitTone1..4 | -12.1 / -11.7 / -11.7 / -12.2 | - | - | - | - | 0.046 | -25.6 / - |
 | weaponChange | -20.0 | - | - | - | - | 0.059 | -33.4 / - |
 | noAmmo | -18.0 | - | - | - | - | 0.104 | -33.2 / - |
@@ -191,12 +273,48 @@ pain grunts.
 | alert | -12.0 | - | - | - | - | 0.288 | -17.5 / - |
 | ambient bed | peak -34.2, RMS -40.1 | | | | | continuous | |
 
+## Measured directional table (enemy minus own, dB, 100 units; back at 600 u includes the -5.46 dB model)
+
+Every value must be >= -0.5 (100 u) / >= -5.96 (600 u); the last column is the footstep-style ILD check at 600 units
+to the right (peak dBFS, far ear / near ear).
+
+| Cue | own (dBFS) | front | back | left | right | above | below | back @600 | right @600 L / R |
+|---|---|---|---|---|---|---|---|---|---|
+| machinegunFire | -7.3 | +1.6 | +2.9 | +1.5 | +1.5 | +2.2 | +3.2 | -2.5 | -18.3 / -11.3 |
+| shotgunFire | -8.1 | +3.1 | +4.5 | +3.4 | +3.4 | +3.0 | +4.0 | -0.9 | -16.5 / -10.1 |
+| rocketFire | -7.9 | +2.8 | +5.0 | +4.1 | +4.1 | +3.1 | +4.0 | -0.4 | -15.9 / -9.3 |
+| railFire | -7.1 | +1.2 | +4.4 | +3.4 | +3.4 | +3.7 | +4.8 | -1.0 | -17.4 / -9.1 |
+| plasmaFire | -8.1 | +3.2 | +3.9 | +3.6 | +3.6 | +2.6 | +2.8 | -1.5 | -16.3 / -10.0 |
+| gauntletFire | -6.9 | +2.3 | +5.1 | +4.3 | +4.3 | +4.2 | +3.7 | +0.1 | -15.5 / -7.9 |
+| lightningLoop | -7.2 | +2.0 | +2.1 | +4.6 | +4.6 | +2.9 | +3.6 | -3.4 | -17.1 / -8.1 |
+| jump | -15.0 | +2.0 | +4.8 | +4.3 | +4.3 | +2.4 | +3.3 | -0.7 | -21.6 / -16.2 |
+| landSoft | -18.0 | +4.0 | +4.5 | +4.2 | +4.2 | +3.4 | +2.9 | -1.0 | -21.9 / -19.3 |
+| landHard | -12.4 | +4.7 | +3.9 | +4.8 | +4.8 | +4.0 | +3.5 | -1.5 | -15.5 / -13.1 |
+| footstep | -14.1 | +0.2 | +1.0 | +2.2 | +2.2 | +1.0 | +0.3 | -4.4 | -26.2 / -17.4 |
+| painLight | -11.1 | +2.1 | +4.9 | +4.6 | +4.6 | +3.0 | +3.6 | -0.6 | -18.6 / -11.9 |
+| painMid | -10.8 | +2.5 | +4.5 | +4.2 | +4.2 | +1.9 | +3.5 | -1.0 | -17.5 / -12.0 |
+| painHeavy | -10.6 | +3.1 | +4.4 | +4.5 | +4.5 | +1.8 | +3.1 | -1.1 | -17.0 / -11.6 |
+| painCritical | -9.3 | +2.7 | +3.8 | +3.4 | +3.4 | +3.0 | +3.4 | -1.7 | -16.4 / -11.4 |
+| death | -8.3 | +0.7 | +1.0 | +1.5 | +1.5 | +0.6 | +0.6 | -4.5 | -15.3 / -12.3 |
+| gib | -9.0 | +6.0 | +6.5 | +6.8 | +6.8 | +5.0 | +5.0 | +1.2 | -10.9 / -7.5 |
+| pickupHealth | -13.2 | +2.4 | +3.7 | +3.5 | +3.5 | +3.7 | +4.0 | -1.8 | -21.5 / -15.1 |
+| pickupMega | -11.1 | +2.2 | +3.3 | +3.7 | +3.7 | +3.1 | +3.5 | -2.1 | -19.1 / -12.8 |
+| pickupArmor | -12.7 | +1.5 | +4.2 | +4.1 | +4.1 | +3.1 | +3.4 | -1.2 | -19.4 / -14.1 |
+| pickupWeapon | -13.1 | +4.1 | +6.8 | +6.1 | +6.1 | +2.8 | +4.2 | +1.3 | -17.0 / -12.5 |
+| pickupAmmo | -14.5 | +1.1 | +4.5 | +2.7 | +2.7 | +3.9 | +4.6 | -0.9 | -24.8 / -17.3 |
+| jumppad | -10.8 | +1.6 | +4.3 | +2.8 | +2.8 | +1.4 | +1.8 | -1.1 | -17.1 / -13.5 |
+| teleport | -11.6 | +3.2 | +4.9 | +4.8 | +4.8 | +3.3 | +3.6 | -0.6 | -17.2 / -12.3 |
+
 ## Recalibrating
 
 Change a recipe, then run `node tools/audio_measure.mjs --calibrate`: it prints a `CUE_TRIM` table that moves every
-cue to its target peak (weapons -6, explosion -3, pain -8..-10, hit tones -12, UI clicks -18..-20, ambient -40 RMS)
+cue to its target peak (weapons -6.5, explosion -3, pain -8..-10, hit tones -12, UI clicks -18..-20, ambient -40 RMS)
 and a `REMOTE_GAIN` suggestion. Paste, rerun without `--calibrate`; the run exits non-zero if a rule breaks. Use
-`--only rail,footstep` while iterating on a cue and `--limiter off` to see pre-limiter levels.
+`--only rail,footstep` while iterating on a cue (add `--dirs` to include the six-direction renders and the per-direction
+"vs own" summary line) and `--limiter off` to see pre-limiter levels. After touching `HRTF_COMP`, re-check the
+directional table: the front entry is part of the trim calibration (pre-limiter headroom is measured straight ahead), the
+other four only have to keep every cue inside [own - 0.5, front + 4]. `--hrtf` re-measures the raw panner if Chrome's
+HRTF changes.
 
 Two Chrome quirks the tool works around: `DynamicsCompressor` starts a fresh context with its gain ramped down (about
 12 dB loss on a burst at t = 0, settled by 200 ms), so cues are triggered at 0.25 s; and its automatic makeup gain
@@ -207,5 +325,7 @@ Two Chrome quirks the tool works around: `DynamicsCompressor` starts a fresh con
 `new AudioEngine({ context?, ambient?, limiter?, seed? })`, `init(opts?)`, `resume()`, `setVolume(v)`,
 `updateListener(eye, angles)`, `event(e, cg, predicted)`, `update(cg, now)`, `close()`, `stats()`,
 `cue(name, { origin, local, id, velocity })` (the named cue table used by the measurement tool), `flushDamage()` (voices
-the queued HIT/PAIN cues; called by `update()` every frame). Events come straight from `shared/game.js`; enemy JUMP / LAND / FOOTSTEP events carry no origin, so the engine resolves the player's
-interpolated position from `cg.remote` (falling back to the game state).
+the queued HIT/PAIN cues through the per-target pain debounce; called by `update()` every frame), `pain(origin, local,
+health, id)` (id is only there for the live audit's per-player instrumentation). Events come straight from `shared/game.js`; the engine reads
+`cg.localId`, `cg.remote`, `cg.game`, `cg.snapshots` and `cg.remoteProjectiles` (all read-only) to place cues that carry no
+origin and to follow rockets in flight.

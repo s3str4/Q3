@@ -110,52 +110,116 @@ test('map: jump pads physically land the player on the upper level', () => {
   }
 });
 
-// Re-walk each walk edge the way the bot navigation does (18-unit step-ups, drops) and assert the player box is
-// never inside solid at any sample, no horizontal sweep is blocked and the walk arrives at the far node. Edges the nav
-// graph marks as jumps (gap jumps between ledges) are checked as a trajectory instead: a box sweep along the line at
-// jump height must be clear and both ends must be free. Jump-pad launch edges are skipped (covered by the pad test).
+// Re-walk each edge the way the bot navigation does (18-unit step-ups, drops, a 44-unit jump over a single obstacle
+// such as a 32 ledge) and assert the player box is never inside solid at any sample, no horizontal sweep is blocked
+// and the walk arrives at the far node. Returns null or the failure reason.
+function walkEdge(a, b) {
+  const steps = Math.max(2, Math.ceil(dist(a, b) / 32));
+  let cur = [...a];
+  for (let s = 1; s <= steps; s++) {
+    const t = s / steps;
+    const target = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    let tr = traceBox(world, cur, [cur[0], cur[1], cur[2] + PM.stepSize], PM.mins, PM.maxs);
+    const from = [...tr.endpos];
+    tr = traceBox(world, from, [target[0], target[1], from[2]], PM.mins, PM.maxs);
+    if (tr.fraction < 0.98) {
+      // a 44-unit jump has to clear it (walkable() allows this for a single obstacle)
+      const up = traceBox(world, cur, [cur[0], cur[1], cur[2] + 44], PM.mins, PM.maxs);
+      tr = traceBox(world, up.endpos, [target[0], target[1], up.endpos[2]], PM.mins, PM.maxs);
+      if (tr.fraction < 0.98) return `blocked at sample ${s}/${steps}`;
+    }
+    if (tr.startsolid || tr.allsolid) return `starts in solid at sample ${s}`;
+    const down = traceBox(world, tr.endpos, [tr.endpos[0], tr.endpos[1], tr.endpos[2] - 320], PM.mins, PM.maxs);
+    if (down.fraction === 1) return 'falls out of the world';
+    cur = [...down.endpos];
+    if (pointContents(world, [cur[0], cur[1], cur[2] + 1], PM.mins, PM.maxs)) return `box in solid at sample ${s}`;
+    // head room: a standing player needs 56 units; check 8 more for a bumpy ceiling
+    const head = traceBox(world, cur, [cur[0], cur[1], cur[2] + 8], PM.mins, PM.maxs);
+    if (head.fraction < 1) return `no head room at sample ${s}`;
+  }
+  if (!(Math.abs(cur[2] - b[2]) < 40 && Math.hypot(cur[0] - b[0], cur[1] - b[1]) < 40)) return 'does not arrive';
+  return null;
+}
+
+// Walk edges must re-walk clean. Edges the nav graph marks as jumps must either re-walk clean with the jump allowance
+// (a ledge or step the 32-unit stride missed) or, for gap jumps between ledges, pass a box sweep along the line at
+// jump height with both ends free. Jump-pad launch edges are skipped (covered by the pad test).
 test('map: player-box clearance along every nav edge', () => {
-  let checked = 0, jumps = 0;
+  let checked = 0, jumps = 0, sweeps = 0;
   const padNodes = new Set(nav.nodes.filter((n) => map.triggers.some((t) => t.kind === 'jumppad' && Math.abs(n.origin[0] - (t.mins[0] + t.maxs[0]) / 2) < 1 && Math.abs(n.origin[1] - (t.mins[1] + t.maxs[1]) / 2) < 1)).map((n) => n.i));
   for (const n of nav.nodes) for (const e of n.edges) {
     if (padNodes.has(n.i) && nav.nodes[e.to].origin[2] - n.origin[2] > 60) continue; // launch edge
     const a = n.origin, b = nav.nodes[e.to].origin;
     assert.ok(!pointContents(world, [a[0], a[1], a[2] + 1], PM.mins, PM.maxs), `node ${a} is inside solid`);
     assert.ok(!pointContents(world, [b[0], b[1], b[2] + 1], PM.mins, PM.maxs), `node ${b} is inside solid`);
+    const why = walkEdge(a, b);
     if (e.jump) {
-      // a full jump lifts the box 44 units: sweep the line at that height (clears 32-unit steps and ledges up to 44)
-      const z = Math.max(a[2], b[2]) + 44;
-      const tr = traceBox(world, [a[0], a[1], z], [b[0], b[1], z], PM.mins, PM.maxs);
-      assert.ok(tr.fraction === 1 && !tr.startsolid, `jump edge ${a} -> ${b} passes through solid at jump height`);
-      jumps++; checked++; continue;
-    }
-    const steps = Math.max(2, Math.ceil(dist(a, b) / 32));
-    let cur = [...a];
-    for (let s = 1; s <= steps; s++) {
-      const t = s / steps;
-      const target = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
-      let tr = traceBox(world, cur, [cur[0], cur[1], cur[2] + PM.stepSize], PM.mins, PM.maxs);
-      const from = [...tr.endpos];
-      tr = traceBox(world, from, [target[0], target[1], from[2]], PM.mins, PM.maxs);
-      if (tr.fraction < 0.98) {
-        // a 44-unit jump has to clear it (walkable() allows this for a single obstacle)
-        const up = traceBox(world, cur, [cur[0], cur[1], cur[2] + 44], PM.mins, PM.maxs);
-        tr = traceBox(world, up.endpos, [target[0], target[1], up.endpos[2]], PM.mins, PM.maxs);
-        assert.ok(tr.fraction >= 0.98, `edge ${a} -> ${b} blocked at sample ${s}/${steps}`);
+      jumps++;
+      if (why) {
+        // a full jump lifts the box 44 units: sweep the line at that height (clears 32-unit steps and ledges up to 44)
+        const z = Math.max(a[2], b[2]) + 44;
+        const tr = traceBox(world, [a[0], a[1], z], [b[0], b[1], z], PM.mins, PM.maxs);
+        assert.ok(tr.fraction === 1 && !tr.startsolid, `jump edge ${a} -> ${b} ${why} and passes through solid at jump height`);
+        sweeps++;
       }
-      assert.ok(!tr.startsolid && !tr.allsolid, `edge ${a} -> ${b} starts in solid at sample ${s}`);
-      const down = traceBox(world, tr.endpos, [tr.endpos[0], tr.endpos[1], tr.endpos[2] - 320], PM.mins, PM.maxs);
-      assert.ok(down.fraction < 1, `edge ${a} -> ${b} falls out of the world`);
-      cur = [...down.endpos];
-      assert.ok(!pointContents(world, [cur[0], cur[1], cur[2] + 1], PM.mins, PM.maxs), `edge ${a} -> ${b}: box in solid at sample ${s}`);
-      // head room: a standing player needs 56 units; check 8 more for a bumpy ceiling
-      const head = traceBox(world, cur, [cur[0], cur[1], cur[2] + 8], PM.mins, PM.maxs);
-      assert.ok(head.fraction === 1, `edge ${a} -> ${b}: no head room at sample ${s}`);
-    }
-    assert.ok(Math.abs(cur[2] - b[2]) < 40 && Math.hypot(cur[0] - b[0], cur[1] - b[1]) < 40, `edge ${a} -> ${b} does not arrive`);
+    } else assert.equal(why, null, `edge ${a} -> ${b} ${why}`);
     checked++;
   }
-  assert.ok(checked > 1000, 'checked ' + checked + ' edges (' + jumps + ' jump edges)');
+  assert.ok(checked > 1000, 'checked ' + checked + ' edges (' + jumps + ' jump edges, ' + sweeps + ' by sweep)');
+});
+
+// Interior structure (critic round 2): the atria and chambers must not be featureless boxes. Eye-to-eye line of
+// sight between nav nodes: within an atrium's floor nodes (z <= 150, so the mezzanine counts as floor) at most 60%
+// of pairs see each other; the atrium's major item is visible from at most 45% of those nodes; and the two loop
+// doors of one atrium (south stub <-> north stub) see each other over fewer than half of their node pairs. Each
+// chamber holds a solid at least 96 high away from its walls and a raised walk level.
+const REGION = ([x, y, z]) => {
+  const up = z > 150;
+  if (x < -512 && Math.abs(y) <= 448) return up ? 'atriumA_upper' : 'atriumA_floor';
+  if (x > 512 && Math.abs(y) <= 448) return up ? 'atriumB_upper' : 'atriumB_floor';
+  if (Math.abs(x) > 512 && Math.abs(x) <= 672 && Math.abs(y) > 448) return (y < 0 ? 'south' : 'north') + 'Stub' + (x < 0 ? 'A' : 'B');
+  if (Math.abs(x) <= 224 && Math.abs(y) > 512) return y < 0 ? 'southChamber' : 'northChamber';
+  return 'other';
+};
+test('map: atria have interior cover (floor LOS <= 60%, majors seen from <= 45% of floor nodes, loop doors hidden)', () => {
+  const eye = (o) => [o[0], o[1], o[2] + PM.viewHeight];
+  const sees = (a, b) => traceBox(world, a, b, ZERO, ZERO).fraction === 1;
+  const zones = {};
+  for (const n of nav.nodes) if (!n.pad) (zones[REGION(n.origin)] ||= []).push(eye(n.origin));
+  const pairsPct = (A, B) => { let v = 0, t = 0; if (A === B) { for (let i = 0; i < A.length; i++) for (let j = i + 1; j < A.length; j++) { t++; if (sees(A[i], A[j])) v++; } } else for (const a of A) for (const b of B) { t++; if (sees(a, b)) v++; } return { t, pct: 100 * v / t }; };
+  for (const side of ['A', 'B']) {
+    const floor = zones['atrium' + side + '_floor'];
+    assert.ok(floor.length >= 30, `atrium ${side} floor nodes: ${floor.length}`);
+    const los = pairsPct(floor, floor);
+    assert.ok(los.pct <= 60, `atrium ${side} floor-to-floor LOS ${los.pct.toFixed(1)}% of ${los.t} pairs (max 60)`);
+    const major = map.items.find((i) => i.type === (side === 'A' ? 'armorRed' : 'mega'));
+    const spot = [major.origin[0], major.origin[1], major.origin[2] + 20];
+    const exposed = floor.filter((e) => sees(e, spot)).length;
+    assert.ok(exposed / floor.length <= 0.45, `${major.type} visible from ${exposed}/${floor.length} atrium ${side} floor nodes (max 45%)`);
+    const stubs = pairsPct(zones['southStub' + side], zones['northStub' + side]);
+    assert.ok(stubs.t >= 30, `stub node pairs ${stubs.t}`);
+    assert.ok(stubs.pct < 50, `atrium ${side} loop doors see each other over ${stubs.pct.toFixed(0)}% of ${stubs.t} stub pairs`);
+  }
+});
+
+test('map: chambers have a tall interior solid and a raised level (not flat cubes)', () => {
+  for (const sign of [-1, 1]) {
+    // a solid at least 96 high somewhere in the chamber's interior (more than 64 from every wall)
+    let tall = false;
+    for (let x = -160; x <= 160 && !tall; x += 16) for (let y = 576; y <= 896 && !tall; y += 16) {
+      const tr = traceBox(world, [x, sign * y, 250], [x, sign * y, -10], ZERO, ZERO);
+      if (tr.endpos[2] >= 96) tall = true;
+    }
+    assert.ok(tall, `${sign < 0 ? 'south' : 'north'} chamber has no interior solid >= 96 high`);
+    // a raised walk level: a nav node in the chamber whose floor is 24-48 above the chamber floor
+    const raised = nav.nodes.filter((n) => REGION(n.origin) === (sign < 0 ? 'southChamber' : 'northChamber') && n.origin[2] - 24 >= 24 && n.origin[2] - 24 <= 48);
+    assert.ok(raised.length >= 2, `${sign < 0 ? 'south' : 'north'} chamber raised-level nav nodes: ${raised.length}`);
+    // the chamber floor nodes do not all see each other (the column breaks the run-door-to-run-door line)
+    const eyes = nav.nodes.filter((n) => REGION(n.origin) === (sign < 0 ? 'southChamber' : 'northChamber')).map((n) => [n.origin[0], n.origin[1], n.origin[2] + PM.viewHeight]);
+    let v = 0, t = 0;
+    for (let i = 0; i < eyes.length; i++) for (let j = i + 1; j < eyes.length; j++) { t++; if (traceBox(world, eyes[i], eyes[j], ZERO, ZERO).fraction === 1) v++; }
+    assert.ok(v / t <= 0.9, `chamber LOS ${(100 * v / t).toFixed(0)}% of ${t} pairs`);
+  }
 });
 
 test('map: corridors >= 96 wide (128 preferred) and ceilings >= 128 (halls) / >= 192 (rooms)', () => {
@@ -173,7 +237,8 @@ test('map: corridors >= 96 wide (128 preferred) and ceilings >= 128 (halls) / >=
     assert.ok(width >= 96, `corridor at ${s.at} is ${width} wide`);
     const up = traceBox(world, s.at, [s.at[0], s.at[1], s.at[2] + 4096], ZERO, ZERO);
     const dn = traceBox(world, s.at, [s.at[0], s.at[1], s.at[2] - 4096], ZERO, ZERO);
-    assert.ok(up.endpos[2] - dn.endpos[2] >= 128, `corridor at ${s.at} ceiling ${up.endpos[2] - dn.endpos[2]}`);
+    // the trace stops 0.125 short of each face, so an exactly-128 void measures 127.75
+    assert.ok(up.endpos[2] - dn.endpos[2] >= 128 - 0.5, `corridor at ${s.at} ceiling ${up.endpos[2] - dn.endpos[2]}`);
   }
 });
 
@@ -221,4 +286,31 @@ test('map: no spawn point sees both majors (mega and red armor)', () => {
   assert.ok(seesOne < map.spawns.length, 'at least one spawn sees neither major');
   // and the majors do not see each other
   assert.ok(!sees([ra[0], ra[1], ra[2] + 30], mh), 'red armor has line of sight to mega');
+});
+
+// Sightline budget: no cross-map rail lanes. Eye-to-eye (a standing player at each spot, PM.viewHeight above the
+// origin) between every pair of spawns, between the rail and lightning balconies, and between every pair of nav
+// nodes: the longest visible lane must stay within meta.maxLane (1600). The intended long line is the bridge
+// (strip to strip, ~1330).
+test('map: no spawn sees another spawn, rail does not see lightning, no nav lane longer than meta.maxLane', () => {
+  const eye = (o) => [o[0], o[1], o[2] + PM.viewHeight];
+  const sees = (a, b) => traceBox(world, a, b, ZERO, ZERO).fraction === 1;
+  for (let i = 0; i < map.spawns.length; i++) for (let j = i + 1; j < map.spawns.length; j++) {
+    assert.ok(!sees(eye(map.spawns[i].origin), eye(map.spawns[j].origin)), `spawn ${i} sees spawn ${j}`);
+  }
+  const rg = map.items.find((i) => i.type === 'weaponRail'), lg = map.items.find((i) => i.type === 'weaponLightning');
+  const stand = (it) => eye([it.origin[0], it.origin[1], it.floorZ + 24]);
+  assert.ok(!sees(stand(rg), stand(lg)), 'a player on the rail gun sees a player on the lightning gun');
+  const nodes = nav.nodes.filter((n) => !n.pad);
+  let longest = 0, pair = null, checked = 0;
+  for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
+    const a = eye(nodes[i].origin), b = eye(nodes[j].origin);
+    const d = dist(a, b);
+    if (d <= longest) continue; // only pairs that could beat the current maximum need a trace
+    checked++;
+    if (sees(a, b)) { longest = d; pair = [nodes[i].origin, nodes[j].origin]; }
+  }
+  assert.ok(checked > 1000, 'traced ' + checked + ' candidate lanes');
+  assert.ok(longest <= meta.maxLane, `longest nav-node lane ${longest.toFixed(0)} > ${meta.maxLane} between ${pair && pair.map((p) => p.map((v) => v.toFixed(0)).join(','))}`);
+  assert.ok(longest >= 1200, 'the bridge view (strip to strip) survives: longest lane ' + longest.toFixed(0));
 });

@@ -12,7 +12,7 @@ import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
 import { WEAPONS, EV } from '../../shared/constants.js';
 import { angleVectors } from '../../shared/vec3.js';
 import { traceBox } from '../../shared/trace.js';
-import { buildWorld } from './world.js';
+import { buildWorld, MAP_LIGHT_DECAY } from './world.js';
 import { ItemView } from './items.js';
 import { Effects } from './effects.js';
 import { setParticleViewport } from './particles.js';
@@ -21,6 +21,7 @@ import { PlayerModel } from './playermodel.js';
 export { weaponColor } from './weapons.js';
 
 const ENEMY_COLOR = 0xff3b3b, OWN_COLOR = 0x4ab3ff;
+const TONE_EXPOSURE = 1.2, TONE_GAMMA = 1.35;
 const _dir = new THREE.Vector3();
 
 export class Renderer {
@@ -29,7 +30,7 @@ export class Renderer {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false, stencil: false, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
     this.renderer.shadowMap.enabled = false; // shadows are baked per vertex (bake.worker.js); players use blob shadows
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping; this.renderer.toneMappingExposure = 1.05;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping; this.renderer.toneMappingExposure = TONE_EXPOSURE;
     this.renderer.info.autoReset = false; // reset once per frame so the stats cover every composer pass
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x05070c);
@@ -49,7 +50,17 @@ export class Renderer {
     // soft coloured halo, while the strength stays low enough that no effect can wash the frame out
     this.bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.34, 0.55, 0.9);
     this.composer.addPass(this.bloom);
-    this.composer.addPass(new OutputPass());
+    // Tone curve: ACES at a generous exposure (the baked pools clip to white like an overbright lightmap) followed
+    // by a gamma that crushes the blacks (Q3's r_overbrightbits / r_gamma look): more tonal range and more saturated
+    // shadows than plain ACES, which flattened both atria of arena_duel into one mid tone. The OutputPass only knows
+    // the built-in curves (CustomToneMapping would silently become a linear clip), so the gamma is patched into it.
+    const output = new OutputPass();
+    output.material.uniforms.toneGamma = { value: TONE_GAMMA };
+    output.material.fragmentShader = output.material.fragmentShader
+      .replace('#include <tonemapping_pars_fragment>', '#include <tonemapping_pars_fragment>\nuniform float toneGamma;')
+      .replace('gl_FragColor.rgb = ACESFilmicToneMapping( gl_FragColor.rgb );', 'gl_FragColor.rgb = pow( ACESFilmicToneMapping( gl_FragColor.rgb ), vec3( toneGamma ) );');
+    this.output = output;
+    this.composer.addPass(output);
     // FXAA's -100 LOD bias is meaningless on a mip-less render target and makes ANGLE/D3D print a warning: drop it
     this.fxaa = new ShaderPass({ ...FXAAShader, fragmentShader: FXAAShader.fragmentShader.replace(/, -100\.0\)/g, ')') });
     this.composer.addPass(this.fxaa);
@@ -60,6 +71,10 @@ export class Renderer {
     this.localId = 0;
     this.kick = [0, 0]; this.bobTime = 0; this.landBob = 0; this.landAt = 0;
     this.death = null; // death camera state
+    // Automation hooks (tools/screenshots.mjs): `freeCamera = { origin, angles: [pitch, yaw] }` overrides the view
+    // (no bob / kicks, viewmodel hidden) for deterministic vantage shots; `afterRender(gl)` runs right after the
+    // frame's last composer pass, while the drawing buffer still holds this frame (frame-exact readPixels captures).
+    this.freeCamera = null; this.afterRender = null;
     this.frameStats = { draws: 0, tris: 0, programs: 0, particles: 0, bake: 0, worldVerts: 0, worldTris: 0, gpuMs: 0 };
     // GPU frame time (EXT_disjoint_timer_query_webgl2) so CPU stalls and real GPU cost can be told apart
     const gl = this.renderer.getContext();
@@ -78,6 +93,7 @@ export class Renderer {
     this.camera.aspect = w / h; this.camera.fov = fovY(this.fov, this.camera.aspect); this.camera.updateProjectionMatrix();
     this.viewmodel.resize(w / h);
   }
+  setTone(exposure, gamma) { this.renderer.toneMappingExposure = exposure; this.output.material.uniforms.toneGamma.value = gamma; }
   setFov(f) { this.fov = f; this.camera.fov = fovY(f, this.camera.aspect); this.camera.updateProjectionMatrix(); }
 
   loadMap(map) {
@@ -90,19 +106,25 @@ export class Renderer {
     for (const pm of this.players.values()) pm.dispose(); this.players.clear();
     this.death = null;
     // --- world geometry + bake ---
+    this.effects.map = map; // decals are clipped to the map's brush faces
     const world = buildWorld(this.scene, map, { onProgress: (k) => { this.frameStats.bake = k; } });
     for (const m of world.meshes) m.frustumCulled = false; // a handful of big meshes: culling would only ever hide the one behind us
     this.frameStats.worldVerts = world.stats.vertices; this.frameStats.worldTris = world.stats.triangles;
     this.bakePromise = world.bake;
+    this.rebake = (params) => { this.frameStats.bake = 0; return world.rebake(params); }; // tuning hook (tools/screenshots.mjs --sweep)
     // --- lights (constant set) ---
     const amb = map.ambient || {};
-    const hemi = new THREE.HemisphereLight(new THREE.Color(amb.hemi ? amb.hemi[0] : '#8fa3c7'), new THREE.Color(amb.hemi ? amb.hemi[1] : '#20160f'), (amb.hemi ? amb.hemi[2] : 0.35) * 0.6);
+    // hemisphere fill for players / items / projectiles only: the world shader ignores it (its bake carries an
+    // AO-occluded copy), so it cannot flatten the baked contact shadows
+    const hemi = new THREE.HemisphereLight(new THREE.Color(amb.hemi ? amb.hemi[0] : '#8fa3c7'), new THREE.Color(amb.hemi ? amb.hemi[1] : '#20160f'), (amb.hemi ? amb.hemi[2] : 0.35) * 0.9);
     hemi.userData.world = true; this.scene.add(hemi);
     this.scene.background = new THREE.Color(amb.sky || 0x05070c);
     this.scene.fog = amb.fog ? new THREE.Fog(new THREE.Color(amb.fog[0]), amb.fog[1], amb.fog[2]) : null;
     for (const l of map.lights) {
-      // real-time copy of each map light (no shadows) for specular/normal-map response; the bake carries the diffuse pools and shadows
-      const pl = new THREE.PointLight(new THREE.Color(l.color), l.intensity * 1400, l.radius, 1.5);
+      // real-time copy of each map light (no shadows). It lights players and items fully; on the world it only adds
+      // specular / normal-map response (+10% diffuse) - MAP_LIGHT_DECAY is how the world shader tells it apart from
+      // effect lights - because the bake carries the diffuse pools, shadows and AO.
+      const pl = new THREE.PointLight(new THREE.Color(l.color), l.intensity * 1400, l.radius, MAP_LIGHT_DECAY);
       pl.position.set(l.origin[0], l.origin[1], l.origin[2]); pl.userData.world = true; this.scene.add(pl);
     }
     if (amb.sun) {
@@ -200,10 +222,15 @@ export class Renderer {
       const tr = traceBox(cg.game.world, [body[0], body[1], body[2] + 8], want, [-6, -6, -6], [6, 6, 6], null, { skipFlags: 4 });
       eye[0] = tr.endpos[0]; eye[1] = tr.endpos[1]; eye[2] = tr.endpos[2];
     }
+    let camRoll = bobRoll + roll;
+    if (this.freeCamera) { // vantage override (screenshots): fixed eye, no bob / kick / roll
+      const fc = this.freeCamera; eye[0] = fc.origin[0]; eye[1] = fc.origin[1]; eye[2] = fc.origin[2]; pitch = fc.angles[0]; yaw = fc.angles[1]; camRoll = 0;
+    }
+    this.viewmodel.hidden = !!this.freeCamera;
     const av = angleVectors([pitch, yaw, 0]);
     this.camera.position.set(eye[0], eye[1], eye[2]);
     this.camera.lookAt(eye[0] + av.forward[0], eye[1] + av.forward[1], eye[2] + av.forward[2]);
-    this.camera.rotateZ((bobRoll + roll) * Math.PI / 180);
+    this.camera.rotateZ(camRoll * Math.PI / 180);
     // zoom / fov changes
     const targetFov = fovY(this.fov, this.camera.aspect);
     if (!(Math.abs(this.camera.fov - targetFov) <= 0.01) && Number.isFinite(targetFov)) { this.camera.fov = targetFov; this.camera.updateProjectionMatrix(); }
@@ -244,6 +271,7 @@ export class Renderer {
     if (ext && this.gpuQueries.length < 4) { q = gl.createQuery(); gl.beginQuery(ext.TIME_ELAPSED_EXT, q); }
     this.composer.render();
     if (q) { gl.endQuery(ext.TIME_ELAPSED_EXT); this.gpuQueries.push(q); }
+    if (this.afterRender) this.afterRender(gl);
     if (ext && this.gpuQueries.length && gl.getQueryParameter(this.gpuQueries[0], gl.QUERY_RESULT_AVAILABLE)) {
       const done = this.gpuQueries.shift();
       if (!gl.getParameter(ext.GPU_DISJOINT_EXT)) this.frameStats.gpuMs = gl.getQueryParameter(done, gl.QUERY_RESULT) / 1e6;

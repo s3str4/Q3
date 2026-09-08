@@ -46,32 +46,34 @@ function normalFromHeight(size, H, strength = 2) {
 // Material definitions. base = albedo tint (linear-ish 0..1), kind = pattern, scale = world units per texture repeat.
 const DEFS = {
   // floors
-  floor: { base: [0.42, 0.43, 0.46], kind: 'plates', rough: 0.62, metal: 0.55, scale: 128 },
-  floor2: { base: [0.30, 0.32, 0.36], kind: 'grate', rough: 0.55, metal: 0.7, scale: 64 },
-  grate: { base: [0.30, 0.32, 0.36], kind: 'grate', rough: 0.55, metal: 0.7, scale: 64 },
+  // Metalness stays <= 0.35 on world surfaces (there is no environment map: higher values only delete the baked
+  // diffuse, see world.js). Steel is warm grey rather than blue-grey so a cool-lit room keeps some red in its mean.
+  floor: { base: [0.47, 0.44, 0.40], kind: 'plates', rough: 0.62, metal: 0.3, scale: 128 },
+  floor2: { base: [0.32, 0.32, 0.34], kind: 'grate', rough: 0.55, metal: 0.35, scale: 64 },
+  grate: { base: [0.32, 0.32, 0.34], kind: 'grate', rough: 0.55, metal: 0.35, scale: 64 },
   concrete: { base: [0.50, 0.48, 0.45], kind: 'concrete', rough: 0.92, metal: 0.0, scale: 128 },
   stone: { base: [0.40, 0.37, 0.34], kind: 'blocks', rough: 0.9, metal: 0.0, scale: 128 },
   // walls
   wall: { base: [0.46, 0.40, 0.34], kind: 'blocks', rough: 0.85, metal: 0.05, scale: 128 },
-  wall2: { base: [0.36, 0.39, 0.44], kind: 'panels', rough: 0.5, metal: 0.65, scale: 128 },
-  metal: { base: [0.40, 0.42, 0.46], kind: 'panels', rough: 0.45, metal: 0.8, scale: 128 },
-  tech: { base: [0.30, 0.33, 0.38], kind: 'tech', rough: 0.45, metal: 0.7, scale: 128, emissive: [0.95, 0.55, 0.18], emissiveIntensity: 1.25 },
-  ceiling: { base: [0.26, 0.27, 0.30], kind: 'vents', rough: 0.75, metal: 0.35, scale: 128 },
+  wall2: { base: [0.50, 0.46, 0.41], kind: 'panels', rough: 0.55, metal: 0.3, scale: 128 },
+  metal: { base: [0.44, 0.44, 0.45], kind: 'panels', rough: 0.45, metal: 0.35, scale: 128 },
+  tech: { base: [0.34, 0.35, 0.38], kind: 'tech', rough: 0.45, metal: 0.35, scale: 128, emissive: [0.95, 0.55, 0.18], emissiveIntensity: 1.25 },
+  ceiling: { base: [0.28, 0.28, 0.30], kind: 'vents', rough: 0.75, metal: 0.25, scale: 128 },
   // Trims (thin bands): metallic with a recessed emissive strip in the middle. Emissive values sit at ~1.0-1.2 in
   // their strongest channel: ACES desaturates anything much brighter into white, and id Tech 3's look is saturated
   // coloured light, so the hue is carried by the ratio between channels, not by intensity.
-  trim: { base: [0.62, 0.48, 0.28], kind: 'trim', rough: 0.35, metal: 0.9, scale: 64 },
-  trim_warm: { base: [0.55, 0.45, 0.32], kind: 'trim', rough: 0.35, metal: 0.9, scale: 64, emissive: [1.0, 0.55, 0.18], emissiveIntensity: 1.2 },
-  trim_cool: { base: [0.36, 0.42, 0.50], kind: 'trim', rough: 0.35, metal: 0.9, scale: 64, emissive: [0.28, 0.65, 1.0], emissiveIntensity: 1.2 },
-  trim_red: { base: [0.45, 0.32, 0.30], kind: 'trim', rough: 0.35, metal: 0.9, scale: 64, emissive: [1.0, 0.18, 0.1], emissiveIntensity: 1.2 },
-  trim_green: { base: [0.32, 0.45, 0.34], kind: 'trim', rough: 0.35, metal: 0.9, scale: 64, emissive: [0.3, 1.0, 0.38], emissiveIntensity: 1.2 },
+  trim: { base: [0.62, 0.48, 0.28], kind: 'trim', rough: 0.35, metal: 0.35, scale: 64 },
+  trim_warm: { base: [0.55, 0.45, 0.32], kind: 'trim', rough: 0.35, metal: 0.35, scale: 64, emissive: [1.0, 0.55, 0.18], emissiveIntensity: 1.2 },
+  trim_cool: { base: [0.36, 0.42, 0.50], kind: 'trim', rough: 0.35, metal: 0.35, scale: 64, emissive: [0.22, 0.55, 1.0], emissiveIntensity: 1.1 },
+  trim_red: { base: [0.45, 0.32, 0.30], kind: 'trim', rough: 0.35, metal: 0.35, scale: 64, emissive: [1.0, 0.18, 0.1], emissiveIntensity: 1.2 },
+  trim_green: { base: [0.32, 0.45, 0.34], kind: 'trim', rough: 0.35, metal: 0.35, scale: 64, emissive: [0.3, 1.0, 0.38], emissiveIntensity: 1.2 },
   // special surfaces
-  jumppad: { base: [0.25, 0.45, 0.75], kind: 'pad', rough: 0.3, metal: 0.6, scale: 64, emissive: [0.18, 0.5, 1.0], emissiveIntensity: 1.3 },
-  teleporter: { base: [0.55, 0.25, 0.85], kind: 'pad', rough: 0.3, metal: 0.4, scale: 64, emissive: [0.6, 0.22, 1.0], emissiveIntensity: 1.2 },
+  jumppad: { base: [0.25, 0.45, 0.75], kind: 'pad', rough: 0.3, metal: 0.35, scale: 64, emissive: [0.18, 0.5, 1.0], emissiveIntensity: 1.3 },
+  teleporter: { base: [0.55, 0.25, 0.85], kind: 'pad', rough: 0.3, metal: 0.35, scale: 64, emissive: [0.6, 0.22, 1.0], emissiveIntensity: 1.2 },
   lava: { base: [1, 0.35, 0.05], kind: 'lava', rough: 0.9, metal: 0, scale: 128, emissive: [1.0, 0.3, 0.04], emissiveIntensity: 1.5 },
   // light panels: dark albedo (the room's lights must not add white on top of the emissive), saturated emissive
   glow_warm: { base: [0.22, 0.16, 0.09], kind: 'flat', rough: 0.6, metal: 0, scale: 64, emissive: [1.0, 0.68, 0.32], emissiveIntensity: 1.1 },
-  glow_cool: { base: [0.09, 0.15, 0.22], kind: 'flat', rough: 0.6, metal: 0, scale: 64, emissive: [0.32, 0.66, 1.0], emissiveIntensity: 1.1 },
+  glow_cool: { base: [0.09, 0.15, 0.22], kind: 'flat', rough: 0.6, metal: 0, scale: 64, emissive: [0.2, 0.52, 1.0], emissiveIntensity: 1.0 },
   glow_red: { base: [0.22, 0.07, 0.06], kind: 'flat', rough: 0.6, metal: 0, scale: 64, emissive: [1.0, 0.2, 0.14], emissiveIntensity: 1.1 },
   glow_green: { base: [0.08, 0.2, 0.1], kind: 'flat', rough: 0.6, metal: 0, scale: 64, emissive: [0.28, 1.0, 0.4], emissiveIntensity: 1.1 },
   clip: { invisible: true },
@@ -81,6 +83,9 @@ const DEFS = {
 // Pattern generators. Each returns { h(x,y) height 0..1, tint(x,y,h) albedo multiplier, wear(x,y,h) 0..1 exposed-metal mask, glow(x,y) 0..1 emissive mask }.
 function pattern(kind, seed, s) {
   const grime = (x, y, sc = 64) => fbm(x, y, seed + 9, 4, sc, s);
+  // Rust speckle: fine-grained (no big blotches: those read as paint splashes) plus medium patches on the more worn
+  // plates. ~25% coverage on steel, the warm accent of a Q3 base texture.
+  const speckle = (x, y, worn = 0) => smooth(0.65 - worn * 0.1, 0.78 - worn * 0.1, fbm(x, y, seed + 61, 3, 6, s)) * (0.4 + 0.6 * smooth(0.4, 0.7, fbm(x, y, seed + 63, 2, 40, s)));
   const scratches = (x, y) => { // sparse thin diagonal streaks of exposed metal
     const a = fbm(x * 0.35 + y, y * 0.05, seed + 21, 2, 6, s);
     return smooth(0.78, 0.84, a) * 0.12 * smooth(0.55, 0.75, fbm(x, y, seed + 31, 2, 16, s));
@@ -96,7 +101,12 @@ function pattern(kind, seed, s) {
         const rivet = Math.hypot(rx - 10, ry - 10) < 3.5 ? 0.85 : 1;
         return bevel * 0.85 * rivet + fbm(x, y, seed, 3, 24, s) * 0.15 - scratches(x, y) * 0.1;
       };
-      return { h, tint: (x, y, hv) => 0.55 + hv * 0.5 - grime(x, y) * 0.3, wear: (x, y) => scratches(x, y), glow: () => 0 };
+      // per-plate brightness (hash of the plate index): worn plates differ, a Q3 floor is never one flat tone
+      const plate = (x, y) => (hash(Math.floor(x / cell), Math.floor(y / cell), seed + 41) - 0.5) * 0.3;
+      // rust: blotches on the worn plates plus pooling in the seams (~20% of the surface, like a Q3 base floor); it is
+      // the warm accent that keeps a cool-lit steel room from reading as one blue wash
+      const worn = (x, y) => smooth(-0.15, 0.15, plate(x, y));
+      return { h, tint: (x, y, hv) => 0.45 + hv * 0.6 + plate(x, y) - grime(x, y) * 0.35, wear: (x, y) => scratches(x, y), glow: () => 0, rust: (x, y, hv) => Math.min(1, smooth(0.55, 0.85, grime(x, y)) * (1 - hv * 0.5) * 0.7 + speckle(x, y, worn(x, y)) * 0.85) };
     }
     case 'grate': { // metal grating: bars with dark square holes
       const h = (x, y) => {
@@ -135,10 +145,14 @@ function pattern(kind, seed, s) {
         const edge = Math.min(gx, 1 - gx, gy, 1 - gy);
         const px = Math.min(gx, 1 - gx) * s, py = Math.min(gy, 1 - gy) * (s / 2);
         const rivet = ((px > 6 && px < 12) || (py > 6 && py < 12)) && (((x + 8) % 32) < 6) && (((y + 8) % 32) < 6) ? -0.25 : 0;
-        return smooth(0, 0.04, edge) * 0.6 + rivet + fbm(x, y, seed, 3, 40, s) * 0.12 - scratches(x, y) * 0.08;
+        return smooth(0, 0.05, edge) * 0.6 + rivet + fbm(x, y, seed, 3, 40, s) * 0.12 - scratches(x, y) * 0.08;
       };
-      // faint vertical rust runs below the rivet rows; kept subtle so panels read as steel, not smeared paint
-      return { h, tint: (x, y, hv) => 0.62 + hv * 0.38 - grime(x, y, 96) * 0.18 - smooth(0.72, 0.92, fbm(x * 0.6, y * 0.15, seed + 7, 2, 10, s)) * 0.12, wear: (x, y) => scratches(x, y), glow: () => 0 };
+      // vertical rust runs below the rivet rows and per-panel tone (hash of the panel index): the steel reads as
+      // individual worn plates with dark seams, not one flat sheet
+      const runs = (x, y) => smooth(0.6, 0.88, fbm(x * 0.6, y * 0.15, seed + 7, 2, 10, s));
+      const panel = (x, y) => (hash(Math.floor(x / s), Math.floor(y / (s / 2)), seed + 43) - 0.5) * 0.3;
+      const worn = (x, y) => smooth(-0.15, 0.15, panel(x, y)); // the more worn panels rust over
+      return { h, tint: (x, y, hv) => 0.42 + hv * 0.62 + panel(x, y) - grime(x, y, 96) * 0.28 - runs(x, y) * 0.15, wear: (x, y) => scratches(x, y), glow: () => 0, rust: (x, y) => Math.min(1, runs(x, y) * 0.8 * smooth(0.4, 0.65, fbm(x, y, seed + 17, 2, 24, s)) + speckle(x, y, worn(x, y)) * 0.85) };
     }
     case 'tech': { // machinery panels with small emissive indicator strips
       const h = (x, y) => {
@@ -196,18 +210,20 @@ export function getMaterial(name) {
     for (let y = 0; y < s; y++) for (let x = 0; x < s; x++) {
       const hv = H[y * s + x];
       const shade = P.tint(x, y, hv);
-      const wear = P.wear(x, y, hv);
+      const wear = P.wear(x, y, hv), rust = P.rust ? clamp01(P.rust(x, y, hv)) : 0;
       const i = (y * s + x) * 4;
-      // worn spots expose bare, brighter, desaturated metal
-      const r = def.base[0] * shade * (1 - wear) + 0.62 * wear, g = def.base[1] * shade * (1 - wear) + 0.62 * wear, b = def.base[2] * shade * (1 - wear) + 0.64 * wear;
+      // worn spots expose bare, brighter, desaturated metal; rust runs are matte orange-brown (the warm accents a
+      // cool-lit steel room needs so it does not read as one flat blue)
+      let r = def.base[0] * shade * (1 - wear) + 0.62 * wear, g = def.base[1] * shade * (1 - wear) + 0.62 * wear, b = def.base[2] * shade * (1 - wear) + 0.64 * wear;
+      r += (0.42 * shade - r) * rust; g += (0.2 * shade - g) * rust; b += (0.09 * shade - b) * rust;
       d[i] = Math.min(255, r * 255); d[i + 1] = Math.min(255, g * 255); d[i + 2] = Math.min(255, b * 255); d[i + 3] = 255;
     }
   });
   const normalMap = normalFromHeight(size, H, def.kind === 'lava' ? 1.5 : def.kind === 'concrete' ? 2.2 : 3);
   const roughnessMap = makeTexture(size, (d, s) => {
     for (let y = 0; y < s; y++) for (let x = 0; x < s; x++) {
-      const g = fbm(x, y, seed + 3, 3, 40, s), wear = P.wear(x, y, H[y * s + x]);
-      const v = clamp01(def.rough + (g - 0.5) * 0.45 - wear * 0.35);
+      const g = fbm(x, y, seed + 3, 3, 40, s), wear = P.wear(x, y, H[y * s + x]), rust = P.rust ? clamp01(P.rust(x, y, H[y * s + x])) : 0;
+      const v = clamp01(def.rough + (g - 0.5) * 0.45 - wear * 0.35 + rust * 0.4);
       const i = (y * s + x) * 4; d[i] = d[i + 1] = d[i + 2] = v * 255; d[i + 3] = 255;
     }
   }, { linear: true });

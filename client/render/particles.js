@@ -32,6 +32,13 @@ void main() {
 }`;
 
 // Procedural sprite textures (no external assets).
+const hash = (x, y) => { const s = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453; return s - Math.floor(s); };
+function vnoise(x, y, scale) { // smooth value noise in 0..1
+  const xs = x / scale, ys = y / scale, x0 = Math.floor(xs), y0 = Math.floor(ys), fx = xs - x0, fy = ys - y0;
+  const sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
+  const a = hash(x0, y0), b = hash(x0 + 1, y0), c = hash(x0, y0 + 1), d = hash(x0 + 1, y0 + 1);
+  return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
+}
 function spriteTexture(kind) {
   const s = 64, c = document.createElement('canvas'); c.width = c.height = s; const ctx = c.getContext('2d');
   const img = ctx.createImageData(s, s); const d = img.data;
@@ -44,9 +51,16 @@ function spriteTexture(kind) {
       const n = Math.sin(x * 0.55 + Math.sin(y * 0.43) * 2.7) * 0.5 + Math.sin(y * 0.71 + Math.cos(x * 0.33) * 2.1) * 0.5 + Math.sin((x + y) * 0.23) * 0.4;
       const edge = 0.72 + n * 0.16;
       a = Math.max(0, 1 - Math.pow(r / edge, 2.2)); a = a * a * (3 - 2 * a) * (0.75 + 0.25 * Math.max(0, 1 - r * 2.2));
-    } else { // smoke: soft disc with a little noise for a wispy edge
+    } else if (kind === 'scorch') { // burn mark: dense dark core, ragged sooty edge (Q3 burnmark style)
+      const n = Math.sin(x * 0.7 + Math.sin(y * 0.5) * 2.5) * 0.5 + Math.sin(y * 0.9 + Math.cos(x * 0.4) * 2.2) * 0.5;
+      const edge = 0.8 + n * 0.18;
+      const k = Math.min(1, r / edge); a = 1 - k * k * k;
+      a *= 0.78 + 0.22 * vnoise(x, y, 5); // soot mottling (value noise, no visible pattern)
+    } else if (kind === 'ring') { // shockwave / pad ring: a soft-edged annulus on a disc (RingGeometry's planar UVs gave a hard inner edge)
+      const k = (r - 0.8) / 0.13; a = Math.exp(-k * k) * (r < 1 ? 1 : 0);
+    } else { // smoke: a dense ragged puff (Q3 smokePuff look): solid enough that one puff reads on its own, soft edge
       const n = Math.sin(x * 0.9 + Math.sin(y * 0.7) * 3) * 0.5 + Math.sin(y * 1.3 + x * 0.4) * 0.5;
-      a = Math.max(0, 1 - r * (1.05 + n * 0.12)); a = a * a * (3 - 2 * a);
+      a = Math.max(0, 1 - r * (1.02 + n * 0.14)); a = Math.pow(a * a * (3 - 2 * a), 0.8) * 0.95;
     }
     const i = (y * s + x) * 4; d[i] = d[i + 1] = d[i + 2] = 255; d[i + 3] = Math.round(a * 255);
   }
@@ -102,8 +116,8 @@ export class ParticlePool {
       off[n * 3] = q.x; off[n * 3 + 1] = q.y; off[n * 3 + 2] = q.z;
       sz[n] = q.size * (1 + q.grow * k) * (1 - q.shrink * k);
       col[n * 3] = q.r; col[n * 3 + 1] = q.g; col[n * 3 + 2] = q.b;
-      // fade: 1 = linear fade out, 2 = fade in then out, 0 = constant
-      al[n] = q.alpha * (q.fade === 2 ? Math.sin(k * Math.PI) : q.fade === 1 ? (1 - k) : q.fade === 3 ? (1 - k) * (1 - k) : 1);
+      // fade: 1 = linear fade out, 2 = fade in then out, 3 = quadratic fade out, 4 = puff (12% fade in, slow tail), 0 = constant
+      al[n] = q.alpha * (q.fade === 2 ? Math.sin(k * Math.PI) : q.fade === 1 ? (1 - k) : q.fade === 3 ? (1 - k) * (1 - k) : q.fade === 4 ? (k < 0.12 ? k / 0.12 : Math.pow(1 - (k - 0.12) / 0.88, 1.3)) : 1);
       rt[n] = q.rot; pxa[n] = q.px;
       n++;
     }
