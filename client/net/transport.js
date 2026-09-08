@@ -49,18 +49,22 @@ export class PeerTransport {
     });
   }
   // Guest: connect to the host's room; resolves when the data channel is open.
-  join(code) {
+  join(code, onProgress = () => {}) {
     return new Promise((resolve, reject) => {
       const peer = new Peer({ config: RTC_CONFIG, debug: 0 });
       this.peer = peer;
-      let opened = false;
-      peer.on('error', (e) => { if (!opened) reject(e); else this.onclose && this.onclose(); });
+      let opened = false, conn = null;
+      const iceState = () => { const pc = conn && conn.peerConnection; return pc ? pc.iceConnectionState + '/' + pc.iceGatheringState : 'no-pc'; };
+      onProgress('contacting the signaling server...');
+      peer.on('error', (e) => { if (!opened) { e.iceState = iceState(); reject(e); } else this.onclose && this.onclose(); });
       peer.on('open', () => {
-        const conn = peer.connect(ROOM_PREFIX + code.toLowerCase(), { reliable: true, serialization: 'json' });
+        onProgress('looking up room ' + code + '...');
+        conn = peer.connect(ROOM_PREFIX + code.toLowerCase(), { reliable: true, serialization: 'json' });
         this._wire(conn);
-        conn.on('open', () => { opened = true; resolve(); });
+        const watch = setInterval(() => { if (opened) return clearInterval(watch); const pc = conn.peerConnection; if (pc) onProgress('host found, negotiating a path (' + pc.iceConnectionState + ')...'); }, 1000);
+        conn.on('open', () => { opened = true; clearInterval(watch); resolve(); });
       });
-      setTimeout(() => { if (!opened) reject(new Error('timeout')); }, 20000);
+      setTimeout(() => { if (!opened) { const e = new Error('timeout'); e.type = 'timeout'; e.iceState = iceState(); reject(e); } }, 30000);
     });
   }
   send(obj) { if (this.conn && this.conn.open) { try { this.conn.send(obj); } catch {} } }
@@ -69,7 +73,16 @@ export class PeerTransport {
 }
 
 // ---- WebRTC P2P with copy/paste signaling (no server at all) ----
-const RTC_CONFIG = { iceServers: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }] };
+// STUN for address discovery plus free public TURN relays (Open Relay by Metered: no account, shared public credentials)
+// as a fallback when a direct path is impossible (symmetric NATs, strict firewalls). Relayed traffic adds latency, so
+// ICE still prefers a direct candidate pair whenever one works.
+const RTC_CONFIG = {
+  iceServers: [
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:openrelay.metered.ca:80'] },
+    { urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443', 'turn:openrelay.metered.ca:443?transport=tcp', 'turns:openrelay.metered.ca:443?transport=tcp'], username: 'openrelayproject', credential: 'openrelayproject' },
+  ],
+  iceCandidatePoolSize: 2,
+};
 
 // Wait for ICE gathering. The code we exchange must carry a public (server-reflexive) candidate or two peers behind
 // different NATs can never connect, so keep waiting (up to 8 s) until STUN has answered or gathering completes.

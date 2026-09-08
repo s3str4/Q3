@@ -106,8 +106,8 @@ async function start(mode) {
       if (code.length < 4) throw new Error('enter the room code the host gave you');
       const pt = new PeerTransport();
       $('p2p-status').textContent = 'joining room ' + code + '...';
-      try { await pt.join(code); }
-      catch (e) { const t = e && e.type; throw new Error(t === 'peer-unavailable' ? 'no host found for room ' + code + ' (check the code; the host must keep the page open)' : 'could not connect (' + (t || e.message) + '); try again or use a server'); }
+      try { await pt.join(code, (msg) => { $('p2p-status').textContent = msg; }); $('p2p-status').textContent = 'connected to the host, loading the arena...'; }
+      catch (e) { const t = e && e.type; throw new Error(t === 'peer-unavailable' ? 'no host found for room ' + code + ' (check the code; the host must have clicked HOST GAME and keep the page open)' : t === 'timeout' ? 'the host was found but no network path opened in 30 s (ICE ' + e.iceState + '). Retry once; if it persists a firewall blocks UDP and TURN on one side, use a server instead' : t === 'network' || t === 'server-error' || t === 'socket-error' ? 'cannot reach the signaling server (' + t + '): a firewall or proxy blocks wss://0.peerjs.com; use the manual exchange below or a server' : 'could not connect (' + (t || e.message) + ', ICE ' + (e.iceState || '?') + '); try again or use a server'); }
       transport = pt;
     } else if (mode.kind === 'host') {
       const map = await loadMap(mapName);
@@ -139,7 +139,7 @@ async function start(mode) {
     transport.onclose = () => stop('disconnected');
     // Q3 shows the map only once the lightmap is loaded: wait for the vertex bake before joining so the countdown
     // never plays over unbaked black faces
-    if (renderer.bakePromise) { status('baking lighting...'); await renderer.bakePromise; }
+    if (renderer.bakePromise) { status('baking lighting...'); await renderer.bakePromise; status(''); }
     cg.join(mode.bot ? { bot: true, botSkill: 0.6 } : {}); // ClientGame.join sends the protocol version and retries until WELCOME
     input = input || new Input(canvas, { sensitivity: settings.sens, requireLock: !params.get('nolock'), keysAllowed: () => running && $('menu').classList.contains('hidden'), onLockChange: (locked) => { $('click-to-play').classList.toggle('hidden', locked || !running || !!params.get('nolock') || !$('menu').classList.contains('hidden')); }, onEscape: () => { if (running) { $('menu').classList.remove('hidden'); $('click-to-play').classList.add('hidden'); status('paused - click CONNECT to resume'); } }, onScoreboard: (s) => hud.scoreboard(s, cg), currentWeapon: () => cg.predicted ? cg.predicted.weapon : 0, hasWeapon: (w) => cg.predicted ? (cg.predicted.weapons & (1 << w)) !== 0 : true });
     input.sensitivity = settings.sens;
