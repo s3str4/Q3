@@ -10,6 +10,12 @@ const wrap = (a) => { a %= TAU; if (a > Math.PI) a -= TAU; if (a < -Math.PI) a +
 const len = (x, y) => Math.hypot(x, y);
 const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
 
+// Vitals balance: PLAYER.hungerPerMin / thirstPerMin are applied per game-HOUR (gameDt is scaled real seconds, so
+// gameDt * DAY.hoursPerSecond is elapsed game hours). The literal per-game-minute rate would empty 75 hunger in 34
+// game minutes (11 real seconds) and starve a full-health player before noon; the per-real-minute reading (what
+// '/ 60' did) drains 16 hunger over the whole slice and vitals never matter. Per game-hour the slice costs ~48
+// hunger / ~66 thirst: eat once and drink twice to keep regen, the 7DTD pace.
+const VITALS_RATE = DAY.hoursPerSecond;
 export function emptyCmd() { return { move: [0, 0], aim: [0, 0], attack: false, interact: false, sprint: false, sneak: false, reload: false, build: false, slot: 0, use: null }; }
 
 export class SurvivalSim {
@@ -62,20 +68,33 @@ export class SurvivalSim {
     return true;
   }
   // circle vs tile grid movement with wall sliding; blockFn(x,y) -> bool
-  moveCircle(e, dx, dy, radius, blockFn) {
-    const tryAxis = (nx, ny) => {
-      const x0 = Math.floor(nx - radius), x1 = Math.floor(nx + radius), y0 = Math.floor(ny - radius), y1 = Math.floor(ny + radius);
+  // circles: optional hard obstacles [{ x, y, r }] (zombies block on the player and on each other, so a doorway holds
+  // a queue instead of a stack and a body in the way is a body in the way)
+  moveCircle(e, dx, dy, radius, blockFn, circles = null) {
+    // deepest overlap of the circle at (nx, ny) with any blocking tile or circle (0 = free)
+    const penetration = (nx, ny) => {
+      const x0 = Math.floor(nx - radius), x1 = Math.floor(nx + radius), y0 = Math.floor(ny - radius), y1 = Math.floor(ny + radius); let pen = 0;
       for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) if (blockFn(tx, ty)) {
         // closest point on tile to circle centre
-        const cx = clamp(nx, tx, tx + 1), cy = clamp(ny, ty, ty + 1); if (len(nx - cx, ny - cy) < radius) return false;
+        const cx = clamp(nx, tx, tx + 1), cy = clamp(ny, ty, ty + 1); const p = radius - len(nx - cx, ny - cy); if (p > pen) pen = p;
       }
-      return true;
+      if (circles) for (const c of circles) { if (c.e === e) continue; const ox = c.e ? c.e.x : c.x, oy = c.e ? c.e.y : c.y; const p = radius + c.r - len(nx - ox, ny - oy); if (p > pen) pen = p; }
+      return pen;
     };
+    // a step is accepted when it ends free, or when it reduces an existing overlap (a body spawned or pushed a few
+    // centimetres into a tile must be able to walk out instead of being wedged for good)
+    const tryAxis = (nx, ny) => { const after = penetration(nx, ny); return after <= 1e-9 || after < penetration(e.x, e.y) - 1e-9; };
     let moved = false;
     if (dx && tryAxis(e.x + dx, e.y)) { e.x += dx; moved = true; }
     if (dy && tryAxis(e.x, e.y + dy)) { e.y += dy; moved = true; }
     e.x = clamp(e.x, radius, this.world.w - radius); e.y = clamp(e.y, radius, this.world.h - radius);
     return moved;
+  }
+  // displace e by (dx, dy) only if the destination circle is free of blocking tiles (per axis, like moveCircle)
+  nudge(e, dx, dy, radius, blockFn) {
+    const free = (nx, ny) => { for (let ty = Math.floor(ny - radius); ty <= Math.floor(ny + radius); ty++) for (let tx = Math.floor(nx - radius); tx <= Math.floor(nx + radius); tx++) if (blockFn(tx, ty)) { const cx = clamp(nx, tx, tx + 1), cy = clamp(ny, ty, ty + 1); if (len(nx - cx, ny - cy) < radius) return false; } return true; };
+    if (dx && free(e.x + dx, e.y)) e.x += dx;
+    if (dy && free(e.x, e.y + dy)) e.y += dy;
   }
   // ---------------- main step ----------------
   step(cmd = emptyCmd()) {
@@ -105,7 +124,10 @@ export class SurvivalSim {
     void prevHour;
   }
   spawnHorde(count, wave) {
-    const edges = this.world.edgeSpawns(); if (!edges.length) return;
+    // only border tiles the flow field can reach: the forest belt leaves pockets that are not 4-connected to the town,
+    // and a zombie born there has no field step and would jam into the trees for the whole night
+    const field = this.flowField(); const w = this.world;
+    let edges = w.edgeSpawns().filter(([x, y]) => field[w.idx(Math.floor(x), Math.floor(y))] < 1e9); if (!edges.length) edges = w.edgeSpawns(); if (!edges.length) return;
     const p = this.player; const picked = [];
     // spawn from spots spread around the border, biased to be at least 14 tiles away
     for (let i = 0; i < count; i++) {
@@ -123,6 +145,7 @@ export class SurvivalSim {
     this.zombies.push(z); this.record('zombie.state', { id: z.id, from: null, to: state });
     return z;
   }
+  // extra: { cause: 'sight'|'sound'|'hit'|'horde'|'lost', by, kind } is merged into the log record next to from/to
   setZState(z, s, extra) {
     if (z.state === s) return; const from = z.state; z.state = s; z.stateT = 0;
     this.record('zombie.state', { id: z.id, from, to: s, ...(extra || {}) });
@@ -136,7 +159,7 @@ export class SurvivalSim {
     const p = this.player, w = this.world;
     p.cooldown = Math.max(0, p.cooldown - DT); p.harvestT = Math.max(0, p.harvestT - DT); p.stateT += DT;
     // vitals
-    p.hunger = clamp(p.hunger - PLAYER.hungerPerMin * gameDt / 60, 0, 100); p.thirst = clamp(p.thirst - PLAYER.thirstPerMin * gameDt / 60, 0, 100);
+    p.hunger = clamp(p.hunger - PLAYER.hungerPerMin * gameDt * VITALS_RATE, 0, 100); p.thirst = clamp(p.thirst - PLAYER.thirstPerMin * gameDt * VITALS_RATE, 0, 100);
     if (p.hunger <= 0 || p.thirst <= 0) { p.starveT += DT; if (p.starveT >= PLAYER.starveInterval) { p.starveT = 0; this.hurtPlayer(PLAYER.starveDamage, null, 'starvation'); } } else p.starveT = 0;
     if (p.bleeding) { p.bleedT += DT; if (p.bleedT >= PLAYER.bleedInterval) { p.bleedT = 0; this.hurtPlayer(PLAYER.bleedDamage, null, 'bleeding'); } }
     if (p.bandageHeal > 0) { const h = Math.min(p.bandageHeal, ITEMS.bandage.heal / PLAYER.bandageHealTime * DT); p.bandageHeal -= h; p.health = Math.min(PLAYER.maxHealth, p.health + h); }
@@ -199,7 +222,7 @@ export class SurvivalSim {
     const p = this.player; if (p.weapon !== 'pistol') return;
     if (p.reloadT > 0 || p.mag >= WEAPONS.pistol.mag) { this.emit(EV.ACTION_DENIED, { reason: 'not_needed', item: 'ammo' }); return; }
     if (!this.count('ammo')) { this.emit(EV.NO_AMMO, { x: p.x, y: p.y }); this.emit(EV.ACTION_DENIED, { reason: 'no_ammo' }); return; }
-    p.reloadT = WEAPONS.pistol.reload; this.emit(EV.RELOAD, { x: p.x, y: p.y, duration: WEAPENS_RELOAD() });
+    p.reloadT = WEAPONS.pistol.reload; this.emit(EV.RELOAD, { x: p.x, y: p.y, duration: WEAPONS.pistol.reload });
   }
   attack(cmd) {
     const p = this.player, wdef = WEAPONS[p.weapon]; if (p.cooldown > 0 || p.reloadT > 0) return;
@@ -218,7 +241,9 @@ export class SurvivalSim {
     }
     // melee
     if (p.stamina < wdef.stamina) { p.cooldown = 0.3; this.emit(EV.ACTION_DENIED, { reason: 'tired', x: p.x, y: p.y }); return; }
-    p.stamina -= wdef.stamina; p.staminaDelay = PLAYER.staminaRegenDelay; p.cooldown = wdef.cooldown; this.metrics.meleeSwings++; this.setPState(PSTATE.ATTACK);
+    // a swing costs stamina but does not pause regen (only sprinting does): sustained melee nets -7.6/s with the bat,
+    // so a fortified player can keep swinging at a chokepoint for ~13 s before tiring instead of 7 swings flat
+    p.stamina -= wdef.stamina; p.cooldown = wdef.cooldown; this.metrics.meleeSwings++; this.setPState(PSTATE.ATTACK);
     let hit = false;
     for (const z of this.zombies) {
       if (z.state === ZSTATE.DEAD) continue; const rx = z.x - p.x, ry = z.y - p.y; const d = len(rx, ry);
@@ -302,7 +327,7 @@ export class SurvivalSim {
   alert(z, from) {
     const prev = z.state; const p = this.player;
     z.lastSeen = { x: p.x, y: p.y }; z.lastSeenT = this.t; z.alertLevel = 1;
-    this.setZState(z, ZSTATE.CHASE, { from }); this.metrics.detections++;
+    this.setZState(z, ZSTATE.CHASE, { cause: from }); this.metrics.detections++;
     this.emit(EV.ZOMBIE_ALERT, { id: z.id, from, prev, x: z.x, y: z.y });
   }
   flowField() {
@@ -329,6 +354,9 @@ export class SurvivalSim {
     const p = this.player, w = this.world, night = this.isNight();
     if (this.tick - this.fieldTick >= 6) { this.field = this.flowField(); this.fieldTick = this.tick; }
     const sight = night ? ZOMBIE.sightNight : ZOMBIE.sightDay;
+    // hard bodies for zombie locomotion: the living player and every live zombie (each skips itself)
+    const bodies = this.zombies.filter((o) => o.state !== ZSTATE.DEAD).map((o) => ({ e: o, r: ZOMBIE.radius }));
+    if (p.alive) bodies.push({ e: null, x: p.x, y: p.y, r: PLAYER.radius });
     for (const z of this.zombies) {
       z.stateT = (z.stateT || 0) + DT;
       if (z.state === ZSTATE.DEAD) { z.deadT += DT; continue; }
@@ -341,7 +369,7 @@ export class SurvivalSim {
       z.seesPlayer = sees;
       if (sees) { z.lastSeen = { x: p.x, y: p.y }; z.lastSeenT = this.t; if (z.state !== ZSTATE.CHASE && z.state !== ZSTATE.ATTACK && z.state !== ZSTATE.STAGGER && z.state !== ZSTATE.BASH) this.alert(z, 'sight'); }
       else if (z.state !== ZSTATE.CHASE && z.state !== ZSTATE.ATTACK && z.state !== ZSTATE.STAGGER && z.state !== ZSTATE.BASH) {
-        for (const n of this.noises) { const nd = len(n.x - z.x, n.y - z.y); if (nd <= n.r * ZOMBIE.hearingScale) { if (n.kind === 'gunshot' || n.kind === 'hurt' || nd < n.r * 0.35) { this.alert(z, 'sound'); z.lastSeen = { x: n.x, y: n.y }; } else if (z.state !== ZSTATE.INVESTIGATE || this.rand() < 0.3) { z.target = { x: n.x, y: n.y }; z.investigateT = 0; this.setZState(z, ZSTATE.INVESTIGATE, { from: 'sound', kind: n.kind }); } break; } }
+        for (const n of this.noises) { const nd = len(n.x - z.x, n.y - z.y); if (nd <= n.r * ZOMBIE.hearingScale) { if (n.kind === 'gunshot' || n.kind === 'hurt' || nd < n.r * 0.35) { this.alert(z, 'sound'); z.lastSeen = { x: n.x, y: n.y }; } else if (z.state !== ZSTATE.INVESTIGATE || this.rand() < 0.3) { z.target = { x: n.x, y: n.y }; z.investigateT = 0; this.setZState(z, ZSTATE.INVESTIGATE, { cause: 'sound', kind: n.kind }); } break; } }
       }
       // ---- state machine ----
       let speed = 0, tx = null, ty = null;
@@ -362,7 +390,7 @@ export class SurvivalSim {
         case ZSTATE.CHASE: {
           if (!p.alive) { this.setZState(z, ZSTATE.IDLE); z.lastSeen = null; break; }
           if (z.horde || sees) { z.lastSeen = { x: p.x, y: p.y }; z.lastSeenT = this.t; }
-          if (!z.horde && !sees && this.t - z.lastSeenT > ZOMBIE.loseSightTime) { z.target = { ...z.lastSeen }; z.investigateT = 0; z.lastSeen = null; this.setZState(z, ZSTATE.INVESTIGATE, { from: 'lost' }); this.emit(EV.ZOMBIE_LOST, { id: z.id, x: z.x, y: z.y }); break; }
+          if (!z.horde && !sees && this.t - z.lastSeenT > ZOMBIE.loseSightTime) { z.target = { ...z.lastSeen }; z.investigateT = 0; z.lastSeen = null; this.setZState(z, ZSTATE.INVESTIGATE, { cause: 'lost' }); this.emit(EV.ZOMBIE_LOST, { id: z.id, x: z.x, y: z.y }); break; }
           if (d <= ZOMBIE.attackRange + PLAYER.radius && z.attackT <= 0 && this.hasLOS(z.x, z.y, p.x, p.y)) { this.setZState(z, ZSTATE.ATTACK); z.attackWind = ZOMBIE.attackWindup; z.facing = Math.atan2(dy, dx); this.emit(EV.ZOMBIE_ATTACK, { id: z.id, x: z.x, y: z.y }); break; }
           speed = (night ? ZOMBIE.chaseNight : ZOMBIE.chase) + (z.horde ? ZOMBIE.hordeSpeedBonus : 0);
           // follow the flow field when the player is known (horde or recent sight); it routes through openings which are then bashed
@@ -389,12 +417,14 @@ export class SurvivalSim {
       // ---- locomotion ----
       if (tx != null) { const mx = tx - z.x, my = ty - z.y; const ml = len(mx, my) || 1; const a = ZOMBIE.accel * DT; z.vx += clamp(mx / ml * speed - z.vx, -a, a); z.vy += clamp(my / ml * speed - z.vy, -a, a); z.facing = Math.atan2(z.vy, z.vx); }
       else { z.vx *= 0.8; z.vy *= 0.8; }
-      // separation from other zombies (soft)
-      for (const o of this.zombies) { if (o === z || o.state === ZSTATE.DEAD) continue; const sx = z.x - o.x, sy = z.y - o.y; const sd = len(sx, sy); if (sd < ZOMBIE.separation && sd > 1e-4) { const push = (ZOMBIE.separation - sd) * 4 * DT; z.x += sx / sd * push; z.y += sy / sd * push; } }
-      // player collision: zombies do not overlap the player
-      { const sx = z.x - p.x, sy = z.y - p.y; const sd = len(sx, sy); const min = ZOMBIE.radius + PLAYER.radius; if (p.alive && sd < min && sd > 1e-4) { z.x += sx / sd * (min - sd); z.y += sy / sd * (min - sd); } }
+      // separation from other zombies (soft) and from the player (hard). Both are direct displacements, so they are
+      // only applied when the pushed position is free: a zombie shoved into a wall could never move again
+      // (moveCircle rejects every step that still overlaps).
+      const zblock = (x, y) => w.blocksZombie(x, y);
+      for (const o of this.zombies) { if (o === z || o.state === ZSTATE.DEAD) continue; const sx = z.x - o.x, sy = z.y - o.y; const sd = len(sx, sy); if (sd < ZOMBIE.separation && sd > 1e-4) { const push = (ZOMBIE.separation - sd) * 4 * DT; this.nudge(z, sx / sd * push, sy / sd * push, ZOMBIE.radius, zblock); } }
+      { const sx = z.x - p.x, sy = z.y - p.y; const sd = len(sx, sy); const min = ZOMBIE.radius + PLAYER.radius; if (p.alive && sd < min && sd > 1e-4) this.nudge(z, sx / sd * (min - sd), sy / sd * (min - sd), ZOMBIE.radius, zblock); }
       const bx = z.x, by = z.y;
-      this.moveCircle(z, z.vx * DT, z.vy * DT, ZOMBIE.radius, (x, y) => w.blocksZombie(x, y));
+      this.moveCircle(z, z.vx * DT, z.vy * DT, ZOMBIE.radius, (x, y) => w.blocksZombie(x, y), bodies);
       const moved = len(z.x - bx, z.y - by);
       if (tx != null && speed > 0) { z.stuckT = moved < speed * DT * 0.25 ? z.stuckT + DT : 0; } else z.stuckT = 0;
       if (moved > 0.002) { z.stepT += DT; const gait = z.state === ZSTATE.CHASE ? 'chase' : 'shamble'; const iv = gait === 'chase' ? 0.38 : 0.7; if (z.stepT >= iv) { z.stepT = 0; this.emit(EV.FOOTSTEP, { who: z.id, surface: SURFACE[w.get(Math.floor(z.x), Math.floor(z.y))] || 'grass', gait, x: z.x, y: z.y }); } }
@@ -448,4 +478,3 @@ export class SurvivalSim {
       barricades: [...this.world.openings.values()].filter((o) => o.barricade > 0).length, metrics: { ...this.metrics } };
   }
 }
-function WEAPENS_RELOAD() { return WEAPONS.pistol.reload; }

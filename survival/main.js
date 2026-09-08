@@ -26,7 +26,7 @@ let renderer = null, sim = null, running = false, paused = false, autopilot = nu
 const eventLog = [];        // every sim event with wall time, for the evidence tool
 const MAX_EVENT_LOG = 20000;
 
-window.__survival = { get sim() { return sim; }, get renderer() { return renderer; }, get audio() { return audio; }, get hud() { return hud; }, get input() { return input; }, eventLog, get paused() { return paused; }, start, setPaused, params };
+window.__survival = { get sim() { return sim; }, get autopilot() { return autopilot; }, get renderer() { return renderer; }, get audio() { return audio; }, get hud() { return hud; }, get input() { return input; }, eventLog, get paused() { return paused; }, start, setPaused, params };
 
 $('vol').value = localStorage.getItem('surv.vol') ?? 0.8;
 $('vol').oninput = (e) => { audio.setVolume(+e.target.value); localStorage.setItem('surv.vol', e.target.value); };
@@ -47,6 +47,7 @@ async function start() {
     renderer = new Renderer(canvas);
     renderer.setWorld(sim.world);
     if (renderer.ready) await renderer.ready;
+    audio.setCameraYaw(renderer.yaw); // listener forward = screen-up so a zombie above you on screen pans centre
     if (params.get('autopilot')) { const m = await import('../shared/survival/autopilot.js'); autopilot = new m.Autopilot(sim, { seed, mode: params.get('autopilot') }); }
     input.enabled = true; input.onToggle = (name) => { if (name === 'inventory') hud.toggleInventory(); else if (name === 'pause') setPaused(!paused); };
     $('menu').classList.add('hidden'); hud.show();
