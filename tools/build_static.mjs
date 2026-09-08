@@ -44,6 +44,8 @@ for (const rel of needed) {
   const src = path.join(jsm, rel); if (!fs.existsSync(src)) continue;
   const dst = path.join(OUT, 'vendor/three/examples/jsm', rel); fs.mkdirSync(path.dirname(dst), { recursive: true }); fs.copyFileSync(src, dst);
 }
+fs.mkdirSync(path.join(OUT, 'vendor/peerjs'), { recursive: true });
+fs.copyFileSync(path.join(ROOT, 'node_modules/peerjs/dist/peerjs.min.js'), path.join(OUT, 'vendor/peerjs/peerjs.min.js'));
 fs.copyFileSync(path.join(ROOT, 'client/index.html'), path.join(OUT, 'index.html'));
 fs.writeFileSync(path.join(OUT, '.nojekyll'), '');
 const size = (dir) => fs.readdirSync(dir, { withFileTypes: true }).reduce((a, e) => a + (e.isDirectory() ? size(path.join(dir, e.name)) : fs.statSync(path.join(dir, e.name)).size), 0);

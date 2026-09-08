@@ -84,10 +84,11 @@ export class Rig {
   }
   // Night self-fill for both shared materials: dark 0 (noon) .. 1 (deep night). Player fill is strong (hero read),
   // zombie fill is faint (pale shape + glowing eyes, still clearly darker than the lantern pool).
-  // A small daytime floor (self-fill) keeps figures standing in building shade from reading as near-black blobs.
+  // Zombies also get a small daytime floor (self-fill) so one standing in building shade by day is not a near-black
+  // blob; the player keeps the plain Lambert look by day (the day silhouette check measures the player torso).
   static setNight(dark) {
     const d = Math.max(0, dark - 0.2); const dayFloor = 0.07 * (1 - Math.min(1, dark));
-    if (Rig.playerMat) Rig.playerMat.emissiveIntensity = dayFloor + d * 0.5;
+    if (Rig.playerMat) Rig.playerMat.emissiveIntensity = d * 0.5;
     if (Rig.zombieMat) Rig.zombieMat.emissiveIntensity = dayFloor + d * 0.35;
   }
   // Common: reset pose then apply per-kind. speed = tiles/s (interpolated), dt real seconds.

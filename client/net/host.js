@@ -1,6 +1,6 @@
 // Browser-hosted authoritative session for direct P2P play (host is also a player via a loopback link).
 import { GameSession, loopbackPair } from '../../shared/session.js';
-import { RtcTransport } from './transport.js';
+import { RtcTransport, PeerTransport } from './transport.js';
 
 export class BrowserHost {
   constructor(map, opts = {}) {
@@ -25,6 +25,17 @@ export class BrowserHost {
     return rtc.createOffer();
   }
   async acceptAnswer(code) { await this.pendingRtc.acceptAnswer(code); }
+  // Register a room on the PeerJS signaling server; the guest joins with the short code. Resolves with the code.
+  async inviteRoom(code) {
+    const pt = new PeerTransport();
+    const link = { onmessage: null, onclose: null, send: (o) => pt.send(o), close: () => pt.close() };
+    pt.onmessage = (m) => link.onmessage && link.onmessage(m);
+    pt.onclose = () => link.onclose && link.onclose();
+    pt.onopen = () => this.session.attach(link, { addr: 'p2p-room' });
+    await pt.host(code);
+    this.pendingPeer = pt;
+    return code;
+  }
   addBot(skill) { return this.session.addBot(undefined, skill); }
   close() { clearInterval(this.timer); for (const c of this.session.clients.values()) c.link.close(); }
 }

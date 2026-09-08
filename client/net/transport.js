@@ -19,6 +19,55 @@ export class WsTransport {
   get open() { return !!this.ws && this.ws.readyState === 1; }
 }
 
+// ---- WebRTC P2P with a short room code ----
+// Signaling goes through the public PeerJS server (free, no account): the host registers the room id, the guest
+// looks it up. Game data still flows directly between the two browsers over the DataChannel (reliable+ordered,
+// same semantics as the WebSocket path). ROOM_PREFIX namespaces our ids on the shared server.
+const ROOM_PREFIX = 'arena-duel-';
+const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I ambiguity
+export function makeRoomCode(n = 5) { const a = new Uint8Array(n); crypto.getRandomValues(a); return [...a].map((v) => ROOM_ALPHABET[v % ROOM_ALPHABET.length]).join(''); }
+export function normalizeRoomCode(s) { return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '').replace(/^ARENADUEL/, '').replace(/^ARENA/, ''); }
+
+export class PeerTransport {
+  constructor() { this.onmessage = null; this.onclose = null; this.onopen = null; this.peer = null; this.conn = null; }
+  static available() { return typeof Peer !== 'undefined'; }
+  _wire(conn) {
+    this.conn = conn;
+    conn.on('open', () => this.onopen && this.onopen());
+    conn.on('data', (m) => { if (m && typeof m === 'object' && this.onmessage) this.onmessage(m); });
+    conn.on('close', () => this.onclose && this.onclose());
+    conn.on('error', () => this.onclose && this.onclose());
+  }
+  // Host: register the room on the signaling server; resolves once the room is live (guest may arrive later).
+  host(code) {
+    return new Promise((resolve, reject) => {
+      const peer = new Peer(ROOM_PREFIX + code.toLowerCase(), { config: RTC_CONFIG, debug: 0 });
+      this.peer = peer;
+      peer.on('open', () => resolve(code));
+      peer.on('error', (e) => reject(e));
+      peer.on('connection', (conn) => { if (this.conn) { conn.close(); return; } this._wire(conn); });
+    });
+  }
+  // Guest: connect to the host's room; resolves when the data channel is open.
+  join(code) {
+    return new Promise((resolve, reject) => {
+      const peer = new Peer({ config: RTC_CONFIG, debug: 0 });
+      this.peer = peer;
+      let opened = false;
+      peer.on('error', (e) => { if (!opened) reject(e); else this.onclose && this.onclose(); });
+      peer.on('open', () => {
+        const conn = peer.connect(ROOM_PREFIX + code.toLowerCase(), { reliable: true, serialization: 'json' });
+        this._wire(conn);
+        conn.on('open', () => { opened = true; resolve(); });
+      });
+      setTimeout(() => { if (!opened) reject(new Error('timeout')); }, 20000);
+    });
+  }
+  send(obj) { if (this.conn && this.conn.open) { try { this.conn.send(obj); } catch {} } }
+  close() { try { this.conn && this.conn.close(); } catch {} try { this.peer && this.peer.destroy(); } catch {} }
+  get open() { return !!(this.conn && this.conn.open); }
+}
+
 // ---- WebRTC P2P with copy/paste signaling (no server at all) ----
 const RTC_CONFIG = { iceServers: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }] };
 

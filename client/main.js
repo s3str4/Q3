@@ -1,7 +1,7 @@
 // Client bootstrap: menu, connection modes (server / practice / P2P host / P2P join), fixed-step input loop, render loop.
 import { loadMap } from '../shared/map.js';
 import { TICK_MS, EV } from '../shared/constants.js';
-import { WsTransport, RtcTransport } from './net/transport.js';
+import { WsTransport, RtcTransport, PeerTransport, makeRoomCode, normalizeRoomCode } from './net/transport.js';
 import { ClientGame } from './net/clientgame.js';
 import { BrowserHost } from './net/host.js';
 import { Input } from './input.js';
@@ -27,21 +27,28 @@ $('opt-cshair').onchange = (e) => { settings.bigCrosshair = e.target.checked; $(
 $('opt-interp').onchange = (e) => { settings.interp = +e.target.value; if (cg) cg.interpSnaps = settings.interp; save(); };
 $('btn-connect').onclick = () => start({ kind: 'ws', url: $('server').value.trim() });
 $('btn-practice').onclick = () => start({ kind: 'ws', url: $('server').value.trim(), bot: true });
-$('btn-host').onclick = () => start({ kind: 'host' });
-$('btn-join').onclick = () => start({ kind: 'join', code: $('p2p-code').value });
+$('btn-host').onclick = () => start({ kind: 'host-room' });
+$('btn-join').onclick = () => start({ kind: 'join-room', room: $('room').value });
+$('room').addEventListener('keydown', (e) => { if (e.key === 'Enter') start({ kind: 'join-room', room: $('room').value }); });
+$('btn-host-manual').onclick = () => start({ kind: 'host' });
+$('btn-join-manual').onclick = () => start({ kind: 'join', code: $('p2p-code').value });
+$('btn-copy-room').onclick = () => copyText($('room-code').textContent, $('btn-copy-room'));
+$('btn-copy-room-link').onclick = () => copyText(location.origin + location.pathname + '?room=' + $('room-code').textContent, $('btn-copy-room-link'));
 const params = new URLSearchParams(location.search);
 // Static hosting (e.g. GitHub Pages): no game server behind the page. Detect it once and put the P2P flow forward.
 const servedByGameServer = fetch('info', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
 servedByGameServer.then((info) => {
   if (info) return;
-  document.querySelector('details').open = true;
+  $('p2p-panel').open = true;
   $('server').placeholder = 'ws://host:27960 (needs a running server)';
   if (!settings.server) $('server').value = '';
   status('static page: use Direct P2P (invite link) or enter a server address');
 });
 // Invite links: ?join=<invite code> pre-fills the code and starts the guest flow automatically.
+const roomParam = params.get('room');
+if (roomParam) { $('p2p-panel').open = true; $('room').value = normalizeRoomCode(roomParam); setTimeout(() => start({ kind: 'join-room', room: roomParam }), 100); }
 const joinCode = params.get('join');
-if (joinCode) { document.querySelector('details').open = true; $('p2p-code').value = joinCode; setTimeout(() => start({ kind: 'join', code: joinCode }), 100); }
+if (joinCode) { $('p2p-panel').open = true; $('p2p-panel').querySelector('details').open = true; $('p2p-code').value = joinCode; setTimeout(() => start({ kind: 'join', code: joinCode }), 100); }
 const copyText = async (text, btn) => {
   try { await navigator.clipboard.writeText(text); const t = btn.textContent; btn.textContent = 'COPIED'; setTimeout(() => (btn.textContent = t), 1200); }
   catch { $('p2p-code').select(); document.execCommand && document.execCommand('copy'); }
@@ -67,6 +74,29 @@ async function start(mode) {
       if (!mode.url) throw new Error('no server address: enter ws://host:27960 or use Direct P2P');
       const info = await fetch(mode.url.replace(/^ws/, 'http').replace(/\/$/, '') + '/info').then((r) => r.json()).catch(() => null);
       if (info) { mapName = info.map; gameMode = info.mode; }
+    } else if (mode.kind === 'host-room') {
+      if (!PeerTransport.available()) throw new Error('signaling library not loaded; use the manual exchange below');
+      const map = await loadMap(mapName);
+      host = new BrowserHost(map, { mode: gameMode, log: (...m) => console.log('[host]', ...m) });
+      transport = host.localLink();
+      $('p2p-status').textContent = 'registering room...';
+      let code = makeRoomCode();
+      for (let attempt = 0; ; attempt++) {
+        try { await host.inviteRoom(code); break; }
+        catch (e) { if (e && e.type === 'unavailable-id' && attempt < 3) { code = makeRoomCode(); continue; } throw new Error('signaling service unreachable (' + (e && e.type || e.message) + '); use the manual exchange below'); }
+      }
+      $('room-code').textContent = code; $('room-box').classList.remove('hidden');
+      $('p2p-status').textContent = 'Give this room code (or the link) to your opponent. The arena opens when they join.';
+      transport.onmessage = null;
+    } else if (mode.kind === 'join-room') {
+      if (!PeerTransport.available()) throw new Error('signaling library not loaded; use the manual exchange below');
+      const code = normalizeRoomCode(mode.room);
+      if (code.length < 4) throw new Error('enter the room code the host gave you');
+      const pt = new PeerTransport();
+      $('p2p-status').textContent = 'joining room ' + code + '...';
+      try { await pt.join(code); }
+      catch (e) { const t = e && e.type; throw new Error(t === 'peer-unavailable' ? 'no host found for room ' + code + ' (check the code; the host must keep the page open)' : 'could not connect (' + (t || e.message) + '); try again or use a server'); }
+      transport = pt;
     } else if (mode.kind === 'host') {
       const map = await loadMap(mapName);
       host = new BrowserHost(map, { mode: gameMode, log: (...m) => console.log('[host]', ...m) });
@@ -89,7 +119,7 @@ async function start(mode) {
     renderer = renderer || new Renderer(canvas);
     renderer.loadMap(map); renderer.setFov(settings.fov);
     hud.setMap(map);
-    let hostWaiting = mode.kind === 'host';
+    let hostWaiting = mode.kind === 'host' || mode.kind === 'host-room';
     cg = new ClientGame(map, transport, { mode: gameMode, name: settings.name, interpSnaps: settings.interp, onEvent: onEvent, onKick: (r) => stop('kicked: ' + r), onInfo: (info) => {
       // P2P host: stay on the menu (the invite code is there) until the guest has joined, then enter the arena
       if (hostWaiting && info.players && info.players.length >= 2) { hostWaiting = false; $('menu').classList.add('hidden'); $('p2p-status').textContent = 'peer connected'; if (!params.get('nolock')) input.lock(); audio.resume(); }

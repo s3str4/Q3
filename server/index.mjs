@@ -69,6 +69,7 @@ export async function createServer(opts) {
     if (url === '/info') { res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }); res.end(JSON.stringify({ ...session.info(), uptime: Math.round(performance.now() / 1000), lagComp: args.lagComp, clients: session.clients.size })); return; }
     let file;
     if (url.startsWith('/vendor/three/')) file = path.join(ROOT, 'node_modules/three', url.slice('/vendor/three/'.length));
+    else if (url.startsWith('/vendor/peerjs/')) file = path.join(ROOT, 'node_modules/peerjs/dist', url.slice('/vendor/peerjs/'.length));
     else file = path.join(ROOT, url);
     if (!file.startsWith(ROOT) || url.includes('/.') ) { res.writeHead(403); res.end(); return; }
     fs.readFile(file, (err, data) => {

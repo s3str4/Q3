@@ -15,6 +15,7 @@
     "serve:static": "node tools/build_static.mjs --serve 8080"
   },
   "dependencies": {
+    "peerjs": "^1.5.4",
     "three": "0.169.0",
     "ws": "8.18.0"
   },

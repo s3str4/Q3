@@ -50,11 +50,15 @@
       <button id="btn-connect" class="primary">CONNECT</button>
       <button id="btn-practice">PRACTICE VS BOT</button>
     </div>
-    <details><summary>Direct P2P (no server, invite code)</summary>
-      <div class="row"><button id="btn-host">HOST GAME</button><button id="btn-join">JOIN WITH CODE</button></div>
-      <textarea id="p2p-code" placeholder="invite / answer code" rows="3"></textarea>
-      <div class="row"><button id="btn-copy-link" class="hidden">COPY INVITE LINK</button><button id="btn-copy-code" class="hidden">COPY CODE</button></div>
+    <details id="p2p-panel"><summary>Direct P2P (no server, room code)</summary>
+      <div class="row"><button id="btn-host">HOST GAME</button><input id="room" placeholder="ROOM CODE" maxlength="12" autocapitalize="characters" spellcheck="false"><button id="btn-join">JOIN</button></div>
+      <div id="room-box" class="hidden">ROOM CODE <b id="room-code"></b> <button id="btn-copy-room">COPY CODE</button><button id="btn-copy-room-link">COPY LINK</button></div>
       <div id="p2p-status"></div>
+      <details><summary>Manual exchange (fallback without the signaling service)</summary>
+        <div class="row"><button id="btn-host-manual">HOST (MANUAL)</button><button id="btn-join-manual">JOIN WITH CODE</button></div>
+        <textarea id="p2p-code" placeholder="invite / answer code" rows="3"></textarea>
+        <div class="row"><button id="btn-copy-link" class="hidden">COPY INVITE LINK</button><button id="btn-copy-code" class="hidden">COPY CODE</button></div>
+      </details>
     </details>
     <details><summary>Settings</summary>
       <label>Sensitivity <input id="sens" type="range" min="1" max="20" step="0.5" value="5"><span id="sens-v">5</span></label>
@@ -67,6 +71,7 @@
     <div id="menu-status"></div>
   </div>
 </div>
+<script src="vendor/peerjs/peerjs.min.js"></script>
 <script type="module" src="client/main.js"></script>
 </body>
 </html>

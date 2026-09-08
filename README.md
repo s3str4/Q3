@@ -83,19 +83,23 @@ The server needs one reachable TCP port (default 27960). Options, all free:
 For a competitive game, port forwarding or Tailscale keep the round-trip time lowest. Ping 100-150 ms is still
 playable thanks to lag compensation; see `docs/NETWORKING.md` for measurements.
 
-## Direct P2P play (no server)
+## Direct P2P play (no server): room codes
 
-The browser can host the match itself over a WebRTC DataChannel; signaling is done by copying two short codes:
+The browser can host the match itself over a WebRTC DataChannel. Finding each other uses a short room code:
 
-1. Host: open the client page (any copy of it, e.g. a local `node server/index.mjs` on your own machine or a static
-   file host), open **Direct P2P**, click **HOST GAME**. The menu stays open with the invite code in the box; send it
-   to your opponent (chat, email). The arena opens automatically once the guest connects.
-2. Guest: paste the invite code into the box and click **JOIN WITH CODE**. An answer code appears; send it back.
-3. Host: paste the answer code and click **JOIN WITH CODE**. The connection opens and the match starts.
+1. Host: open **Direct P2P**, click **HOST GAME**. A 5-letter room code appears (e.g. `XDQVH`) with **COPY CODE** /
+   **COPY LINK** buttons. Send either to your opponent. The menu stays open until they join.
+2. Guest: type the code in the ROOM CODE box and press **JOIN** (or just open the link, which joins automatically).
+3. Both arenas open with the countdown. The host runs the authoritative simulation (zero ping for the host, the
+   direct peer-to-peer round trip for the guest).
 
-The host runs the authoritative simulation in its browser tab (same code as the server), so the host has zero ping
-and the guest has the peer-to-peer round-trip. Both sides use Google's public STUN servers to find their addresses;
-with two symmetric NATs the direct connection can fail (30 s timeout), in which case use one of the server options.
+The room lookup goes through the public PeerJS signaling server (free, no account, only used to exchange the
+connection descriptions); the game traffic itself flows directly between the two browsers. If that service is
+unreachable, the **Manual exchange** fallback under the same panel works with no third party at all: HOST (MANUAL)
+produces an invite code/link, the guest's page answers with a code, the host pastes it (5-minute window).
+
+Both sides use Google's public STUN servers to find their public addresses; with two symmetric NATs the direct
+connection can fail, in which case use one of the server options above.
 
 ## Static hosting (GitHub Pages): play from a link, no server
 
@@ -110,15 +114,9 @@ GitHub Pages: push this repository to GitHub, then in the repository open Settin
 "GitHub Actions". The workflow in `.github/workflows/pages.yml` builds `dist/` and deploys it on every push to
 `main`; the page is served at `https://<user>.github.io/<repo>/`.
 
-On a static page there is no game server, so the page opens the **Direct P2P** panel by itself:
-
-1. Host: click **HOST GAME**, then **COPY INVITE LINK** and send the link (it carries the invite code) to your opponent.
-2. Guest: opening the link starts the join automatically and shows an answer code; **COPY CODE** and send it back.
-3. Host: paste the answer code, click **JOIN WITH CODE**. Both arenas open; the host runs the simulation.
-
-The exchange can take up to 5 minutes before the guest's offer expires. Both sides use public STUN servers; if the
-direct connection fails (two symmetric NATs), fall back to a server (port forwarding or a tunnel, above). Any static
-host works the same way (Netlify, Cloudflare Pages, a plain web server) as long as it serves `dist/` over HTTPS.
+On a static page there is no game server, so the page opens the **Direct P2P** panel by itself: HOST GAME, send
+the room code or link, done (see "Direct P2P play" above). Any static host works the same way (Netlify, Cloudflare
+Pages, a plain web server) as long as it serves `dist/` over HTTPS.
 
 ## Controls
 
