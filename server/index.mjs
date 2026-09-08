@@ -64,7 +64,6 @@ export async function createServer(opts) {
   const httpServer = http.createServer((req, res) => {
     let url = decodeURIComponent((req.url || '/').split('?')[0]);
     if (url === '/') url = '/client/index.html';
-    if (url === '/survival' || url === '/survival/') url = '/survival/index.html';
     if (url === '/favicon.ico') { res.writeHead(204); res.end(); return; }
     if (url === '/info') { res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }); res.end(JSON.stringify({ ...session.info(), uptime: Math.round(performance.now() / 1000), lagComp: args.lagComp, clients: session.clients.size })); return; }
     let file;

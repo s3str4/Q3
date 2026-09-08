@@ -173,36 +173,3 @@ tools/      bot_duel.mjs, netbench.mjs, evidence.mjs, screenshots.mjs, audio_mea
 tests/      node:test suites
 docs/       BENCHMARK.md (reference targets), NETWORKING.md, LEDGER.md (progress), AUDIO.md
 ```
-
-## Survival slice: Millbrook, Survive the Night (`/survival`)
-
-A Project Zomboid-style survival prototype (fixed 3/4 camera, one deterministic 30 Hz simulation) whose
-moment-to-moment loop follows 7 Days to Die: loot a small town, manage hunger/thirst/stamina/bleeding, sneak past or
-fight zombies that see and hear you, chop trees for planks, barricade a house before 21:00, and survive the blood-moon
-horde waves (22:00, 00:00, 03:00) until 06:00. The benchmark mapping and acceptance tests are in
-`docs/SURVIVAL_BENCHMARK.md`; progress and verdicts in `docs/SURVIVAL_LEDGER.md`.
-
-```sh
-node server/index.mjs --quiet            # same server as the arena
-# open http://localhost:27960/survival
-```
-
-| Action | Keys |
-|---|---|
-| Move / sprint / sneak | W A S D / Shift / Ctrl (or C) |
-| Attack (aim with the mouse) | Left mouse button (or Space) |
-| Interact: loot, doors, chop trees | E |
-| Barricade the nearest door or window (2 planks) | B |
-| Weapons | 1 fists · 2 bat · 3 pistol · mouse wheel · R reload |
-| Eat / drink / bandage | F / G / H |
-| Inventory / pause | Tab (or I) / Esc |
-
-URL parameters: `?auto=1` starts immediately, `fast=N` multiplies game time (evidence runs use 4-8), `seed=N`,
-`nohorde=1`, `autopilot=win|reckless` lets `shared/survival/autopilot.js` play.
-
-```sh
-node --test tests/survival_sim.test.mjs        # rules + autopilot completes the slice (headless, seconds)
-node --test tests/survival_client.test.mjs     # real headless Edge: no errors, frame p99, cue/event alignment
-node tools/survival_evidence.mjs --name run1 --port 27995 --fast 4    # screenshots + state/event/audio logs + metrics into .evidence/survival/run1/
-node tools/survival_audio_measure.mjs          # offline render of every cue: peak/duration table, clipping check
-```
