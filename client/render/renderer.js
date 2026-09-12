@@ -17,7 +17,7 @@ import { ItemView } from './items.js';
 import { Effects } from './effects.js';
 import { setParticleViewport } from './particles.js';
 import { ViewModel } from './viewmodel.js';
-import { PlayerModel } from './playermodel.js';
+import { PlayerModel, SKIN_NAMES } from './playermodel.js';
 export { weaponColor } from './weapons.js';
 
 const ENEMY_COLOR = 0xff3b3b, OWN_COLOR = 0x4ab3ff;
@@ -153,9 +153,9 @@ export class Renderer {
     const o = [eye[0] + fwd[0] * 120, eye[1] + fwd[1] * 120, eye[2]];
     this.camera.position.set(eye[0], eye[1], eye[2]); this.camera.lookAt(o[0], o[1], o[2]); this.camera.updateMatrixWorld();
     this.viewmodel.camera.position.copy(this.camera.position); this.viewmodel.camera.quaternion.copy(this.camera.quaternion);
-    if (!this.warmPlayer) this.warmPlayer = new PlayerModel(this.scene, ENEMY_COLOR);
-    this.warmPlayer.group.visible = true; this.warmPlayer.shadow.visible = true;
-    this.warmPlayer.update(o, [0, 0], { v: [100, 0, 0], g: 1, w: WEAPONS.ROCKET, pf: 0 }, performance.now(), 0.016, o[2] - 24);
+    // one warm model per skin (every skin texture uploaded, both player programs compiled), each holding a different weapon
+    if (!this.warmPlayers) this.warmPlayers = SKIN_NAMES.map((skin, i) => new PlayerModel(this.scene, i ? ENEMY_COLOR : OWN_COLOR, skin, i));
+    this.warmPlayers.forEach((wp, i) => { wp.group.visible = true; wp.shadow.visible = true; wp.update([o[0], o[1] + (i - 1) * 40, o[2]], [0, 0], { v: [100, 0, 0], g: 1, w: [WEAPONS.ROCKET, WEAPONS.RAIL, WEAPONS.GAUNTLET][i], pf: 0, ah: 1 }, performance.now(), 0.016, o[2] - 24); });
     this.effects.warmup(o, this.camera);
     const vmHolders = Object.values(WEAPONS).filter((w) => w > 0).map((w) => this.viewmodel.ensure(w));
     for (const h of vmHolders) h.visible = true;
@@ -167,17 +167,18 @@ export class Renderer {
     for (const h of vmHolders) h.visible = false;
     this.viewmodel.flashSprite.material.opacity = 0;
     this.effects.purge();
-    this.warmPlayer.group.visible = false; this.warmPlayer.shadow.visible = false;
+    for (const wp of this.warmPlayers) { wp.group.visible = false; wp.shadow.visible = false; }
   }
 
-  ensurePlayer(id) {
+  ensurePlayer(id, r) {
     let pm = this.players.get(id);
-    if (!pm) { pm = new PlayerModel(this.scene, id === this.localId ? OWN_COLOR : ENEMY_COLOR); this.players.set(id, pm); }
+    if (!pm) { pm = new PlayerModel(this.scene, id === this.localId ? OWN_COLOR : ENEMY_COLOR, r && r.n, id); this.players.set(id, pm); }
     return pm;
   }
 
   event(e, cg) {
     this.effects.event(e, cg, this);
+    if (e.id && e.id !== this.localId) { const pm = this.players.get(e.id); if (pm) pm.event(e, performance.now()); } // recoil / flinch / landing dip on the remote model
     if (e.type === EV.FIRE && e.id === this.localId) this.viewmodel.fire(e.weapon);
     if (e.type === EV.PAIN && e.id === this.localId) { this.kick[0] += (Math.random() - 0.5) * 3; this.kick[1] += Math.min(6, e.damage / 12); }
     if (e.type === EV.LAND && e.id === this.localId) { this.landBob = e.hard ? 8 : 4; this.landAt = performance.now(); }
@@ -245,7 +246,7 @@ export class Renderer {
     const seen = new Set();
     for (const [id, r] of cg.remote) {
       seen.add(id);
-      const pm = this.ensurePlayer(id);
+      const pm = this.ensurePlayer(id, r);
       const down = traceBox(cg.game.world, r.origin, [r.origin[0], r.origin[1], r.origin[2] - 1024], [-8, -8, -24], [8, 8, 0], null, { skipFlags: 4 });
       pm.update(r.origin, r.angles, r, now, dt, down.fraction < 1 ? down.endpos[2] - 24 : undefined);
     }

@@ -63,7 +63,7 @@ const state = () => ev(async () => {
     const eye = [p.ps.origin[0], p.ps.origin[1], p.ps.origin[2] + 26];
     los = traceBox(cg.game.world, eye, [en.origin[0], en.origin[1], en.origin[2] + 8], [0, 0, 0], [0, 0, 0], null, { skipFlags: 4 }).fraction >= 1;
   }
-  return { o: p.ps.origin, yaw: p.ps.viewangles[1], w: p.weapon, weapons: p.weapons, hp: p.health, dead: p.dead, enemy: en ? { o: en.origin, d: en.d, w: en.w, los } : null, stats: a.renderer.frameStats };
+  return { o: p.ps.origin, yaw: p.ps.viewangles[1], w: p.weapon, weapons: p.weapons, ammo: p.ammo, hp: p.health, dead: p.dead, enemy: en ? { o: en.origin, d: en.d, w: en.w, los } : null, stats: a.renderer.frameStats };
 });
 const shot = async (name) => { const f = path.join(outDir, name + '.png'); await page.screenshot({ path: f }); console.log('shot', path.relative(process.cwd(), f)); return f; };
 const yawTo = (from, to) => Math.atan2(to[1] - from[1], to[0] - from[0]) * 180 / Math.PI;
@@ -351,12 +351,22 @@ if (ready) {
   await sleep(1200); await shot('03c_scorch_mark'); // fireball and smoke gone: the mark clipped to the wall's faces
   // rocket trail proper: one rocket down the longest free line, captured 500 ms into the flight (450 units of
   // trail, the puffs behind it 0.5 s old at most) and measured over the whole frame against a fresh reference
-  const armed = await aliveWithRocket(); s = await state();
-  const long = await ev(async (eye) => { const { traceBox } = await import('/shared/trace.js'); const cg = window.__arena.cg; let best = { yaw: 0, d: 0 }; for (let k = 0; k < 32; k++) { const yaw = k * 11.25, r = yaw * Math.PI / 180, end = [eye[0] + Math.cos(r) * 3000, eye[1] + Math.sin(r) * 3000, eye[2]]; const d = traceBox(cg.game.world, eye, end, [0, 0, 0], [0, 0, 0], null, { skipFlags: 4 }).fraction * 3000; if (d > best.d) best = { yaw, d }; } return best; }, [s.o[0], s.o[1], s.o[2] + 26]);
-  await setAngles(-2, long.yaw); await sleep(700); // let the previous smoke clear
-  await capture('fx_ref2', 30); // reference from the firing pose itself
+  // the bot may kill us or we may be out of rockets between the explosion and this shot: every attempt re-arms
+  // (re-routing to the pickup when the launcher or its ammo is gone), re-aims and takes a fresh reference frame
   await ev(() => { const a = window.__arena, r = a.renderer, cap = window.__cap; a.__fired2 = 0; const orig = r.effects.localFire; r.effects.localFire = (e, cg) => { if (!a.__fired2 && e.weapon === 5 /* WEAPONS.ROCKET */) { a.__fired2 = performance.now(); cap.jobs.push({ name: 'fx_rocket_trail_500ms', at: a.__fired2 + 500 }); } return orig(e, cg); }; });
-  for (let attempt = 0; attempt < 3 && armed && !(await ev(() => window.__arena.__fired2 > 0)); attempt++) { if ((await state()).dead) { await sleep(1500); await aliveWithRocket(); continue; } await fire(true); await waitFor(() => window.__arena.__fired2 > 0, 2500); await fire(false); }
+  let long = { yaw: 0, d: 0 };
+  for (let attempt = 0; attempt < 4 && !(await ev(() => !!window.__cap.results.fx_rocket_trail_500ms)); attempt++) {
+    s = await state();
+    if (s.dead || !(s.weapons & (1 << 5)) || (s.ammo && s.ammo[5] === 0)) { if (!(await ensureWeapon('weaponRocket', 5, 'Digit4'))) break; }
+    if (!(await aliveWithRocket())) continue;
+    s = await state();
+    long = await ev(async (eye) => { const { traceBox } = await import('/shared/trace.js'); const cg = window.__arena.cg; let best = { yaw: 0, d: 0 }; for (let k = 0; k < 32; k++) { const yaw = k * 11.25, r = yaw * Math.PI / 180, end = [eye[0] + Math.cos(r) * 3000, eye[1] + Math.sin(r) * 3000, eye[2]]; const d = traceBox(cg.game.world, eye, end, [0, 0, 0], [0, 0, 0], null, { skipFlags: 4 }).fraction * 3000; if (d > best.d) best = { yaw, d }; } return best; }, [s.o[0], s.o[1], s.o[2] + 26]);
+    await setAngles(-2, long.yaw); await sleep(700); // let the previous smoke clear
+    await ev(() => window.__capDrop('fx_ref2')); await capture('fx_ref2', 30); // reference from the firing pose itself
+    await fire(true); await waitFor(() => window.__arena.__fired2 > 0, 2500); await fire(false);
+    await ev(() => window.__capWait('fx_rocket_trail_500ms', 1500));
+    if (!(await ev(() => !!window.__cap.results.fx_rocket_trail_500ms))) await ev(() => { window.__arena.__fired2 = 0; }); // fired but the capture never came (e.g. died): allow another shot
+  }
   if (await ev(() => window.__capWait('fx_rocket_trail_500ms', 3000))) {
     await savePng('fx_rocket_trail_500ms');
     fx.fx_rocket_trail_500ms = await ev(() => window.__capDiff('fx_rocket_trail_500ms', 'fx_ref2', { x: 0, y: 0, w: 4096, h: 4096 }, 14));

@@ -1,19 +1,24 @@
 // First-person weapon viewmodel. Lives in its own scene + camera (fixed 90-degree horizontal FOV like Q3's
 // weapon rendering, independent of the player's FOV) rendered after the world with the depth buffer cleared, so
 // the gun never clips into walls. Position is low-right, barrel forward, with Q3-style bob, sway, idle drift,
-// recoil and drop/raise switch animation. Muzzle flash = additive sprite + a small light inside this scene.
+// per-weapon recoil (rail: hard kick + slow slide back, RL: kick + climb, MG: rattle, SG: kick + pump cycle),
+// drop/raise switch animation, muzzle flashes from a 4-variant sprite sheet, an LG core that glows while firing
+// and a rail coil that charges after a shot. Live parts use this instance's own materials (see weapons.js).
 import * as THREE from 'three';
 import { WEAPONS, WEAPON_DROP_TIME, WEAPON_RAISE_TIME } from '../../shared/constants.js';
 import { makeWeaponMesh, weaponColor } from './weapons.js';
-import { getSprite } from './particles.js';
+import { getSheet } from './particles.js';
 
 const SCALE = 0.4;
 // per-weapon scale on top of SCALE: the fat RL tube and the tall LG (rings + rods) would otherwise exceed the 25%
-// screen-height budget that keeps the gun out of the way (measured at 1.0: RL 27.7%, LG 25.3%, RG 23.1%)
-const WEAPON_SCALE = { [WEAPONS.ROCKET]: 0.8, [WEAPONS.LIGHTNING]: 0.9, [WEAPONS.RAIL]: 0.95, [WEAPONS.PLASMA]: 0.92 };
+// screen-height budget that keeps the gun out of the way
+const WEAPON_SCALE = { [WEAPONS.ROCKET]: 0.78, [WEAPONS.LIGHTNING]: 0.88, [WEAPONS.RAIL]: 0.92, [WEAPONS.PLASMA]: 0.9, [WEAPONS.GAUNTLET]: 1.1 };
 // rest pose in camera space (+X right, +Y up, -Z forward): low-right, ~20% of screen height at the 90-degree weapon FOV
 const REST = new THREE.Vector3(9.5, -10.5, -40);
-const _v = new THREE.Vector3(), _w = new THREE.Vector3(), _f = new THREE.Vector3();
+const _v = new THREE.Vector3(), _w = new THREE.Vector3(), _f = new THREE.Vector3(), _c = new THREE.Color();
+const KICK = { [WEAPONS.RAIL]: 2.6, [WEAPONS.ROCKET]: 2.0, [WEAPONS.SHOTGUN]: 1.8, [WEAPONS.PLASMA]: 0.5, [WEAPONS.MACHINEGUN]: 0.45, [WEAPONS.LIGHTNING]: 0.15, [WEAPONS.GAUNTLET]: 0.3 };
+const FLASH_MS = { [WEAPONS.LIGHTNING]: 60, [WEAPONS.RAIL]: 150, [WEAPONS.ROCKET]: 80, [WEAPONS.SHOTGUN]: 80, [WEAPONS.PLASMA]: 50, [WEAPONS.MACHINEGUN]: 45 };
+const FLASH_SIZE = { [WEAPONS.ROCKET]: 8, [WEAPONS.RAIL]: 6.5, [WEAPONS.SHOTGUN]: 7.5, [WEAPONS.LIGHTNING]: 2.2, [WEAPONS.PLASMA]: 4, [WEAPONS.MACHINEGUN]: 4.5 };
 
 export class ViewModel {
   constructor(mainCamera) {
@@ -26,31 +31,44 @@ export class ViewModel {
     this.hemi = new THREE.HemisphereLight(0xbfd0ee, 0x4a3a2a, 1.7); this.scene.add(this.hemi);
     this.key = new THREE.DirectionalLight(0xfff0e0, 2.4); this.key.position.set(-0.6, 0.8, 0.5); this.camera.add(this.key); this.camera.add(this.key.target); this.key.target.position.set(0, 0, -1);
     this.muzzleLight = new THREE.PointLight(0xffffff, 0, 60, 2); this.rig.add(this.muzzleLight);
-    this.flashSprite = new THREE.Sprite(new THREE.SpriteMaterial({ color: 0xffffff, map: getSprite('soft'), transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
-    this.flashSprite.renderOrder = 30; this.rig.add(this.flashSprite);
+    // muzzle flash: one sprite per sheet variant (each a cloned texture window), one of them shown per shot
+    const sh = getSheet('flash');
+    this.flashMats = [];
+    for (let i = 0; i < 4; i++) {
+      const t = sh.tex.clone(); t.repeat.set(1 / sh.cols, 1 / sh.rows); t.offset.set((i % sh.cols) / sh.cols, (sh.rows - 1 - Math.floor(i / sh.cols)) / sh.rows); t.needsUpdate = true;
+      this.flashMats.push(new THREE.SpriteMaterial({ color: 0xffffff, map: t, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
+    }
+    this.flashSprite = new THREE.Sprite(this.flashMats[0]); this.flashSprite.renderOrder = 30; this.rig.add(this.flashSprite);
     this.meshes = {};
-    this.current = 0; this.recoil = 0; this.sway = [0, 0]; this.lastYaw = 0; this.lastPitch = 0; this.flashUntil = 0; this.flashColor = 0xffffff; this.hidden = false;
+    this.current = 0; this.recoil = 0; this.slide = 0; this.climb = 0; this.sway = [0, 0]; this.lastYaw = 0; this.lastPitch = 0; this.flashUntil = 0; this.flashColor = 0xffffff; this.hidden = false;
+    this.firingUntil = 0; this.lastFireAt = -1e9; this.lastFireWeapon = 0; this.railCharge = 0; this.bladeSpin = 0; this.bladeAngle = 0; this.pumpAt = -1e9;
     this.muzzle = new THREE.Object3D(); this.rig.add(this.muzzle);
-    this.lgGlow = null;
   }
   ensure(w) {
     if (!this.meshes[w]) {
-      const m = makeWeaponMesh(w, SCALE * (WEAPON_SCALE[w] || 1));
+      const m = makeWeaponMesh(w, SCALE * (WEAPON_SCALE[w] || 1), { live: true });
       // weapon local +X forward -> camera -Z forward; +Z up -> +Y up; +Y left -> -X (mirror keeps it right-handed)
       const holder = new THREE.Group(); holder.add(m);
       m.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(new THREE.Vector3(0, 0, -1), new THREE.Vector3(-1, 0, 0), new THREE.Vector3(0, 1, 0)));
       holder.userData.muzzle = new THREE.Vector3(...m.userData.muzzle).applyQuaternion(m.quaternion);
+      holder.userData.model = m;
       holder.visible = false; this.rig.add(holder); this.meshes[w] = holder;
     }
     return this.meshes[w];
   }
   setWeapon(w) { this.current = w; }
   fire(w) {
-    this.recoil = 1;
+    const now = performance.now();
+    this.recoil = 1; this.lastFireAt = now; this.lastFireWeapon = w;
+    if (w === WEAPONS.RAIL) { this.slide = 1; this.railCharge = 1; }
+    if (w === WEAPONS.ROCKET) this.climb = 1;
+    if (w === WEAPONS.SHOTGUN) this.pumpAt = now + 180;
+    this.firingUntil = now + (w === WEAPONS.LIGHTNING ? 90 : w === WEAPONS.MACHINEGUN ? 130 : 60);
     const c = weaponColor(w);
     this.flashColor = c;
-    this.flashUntil = performance.now() + (w === WEAPONS.LIGHTNING ? 60 : w === WEAPONS.RAIL ? 160 : 70);
-    this.flashSize = w === WEAPONS.ROCKET ? 7 : w === WEAPONS.RAIL ? 6 : w === WEAPONS.SHOTGUN ? 6.5 : w === WEAPONS.LIGHTNING ? 1.6 : 4;
+    this.flashUntil = now + (FLASH_MS[w] || 0);
+    this.flashSize = FLASH_SIZE[w] || 4;
+    this.flashSprite.material = this.flashMats[w === WEAPONS.ROCKET || w === WEAPONS.SHOTGUN ? Math.floor(Math.random() * 3) : Math.random() < 0.5 ? 3 : Math.floor(Math.random() * 3)];
     this.muzzleLight.color.setHex(c); this.muzzleLight.intensity = w === WEAPONS.LIGHTNING ? 30 : w === WEAPONS.MACHINEGUN ? 50 : 90;
   }
   // World-space muzzle position for the MAIN camera: the viewmodel is drawn with its own FOV, so its screen
@@ -74,10 +92,13 @@ export class ViewModel {
   update(p, view, now, dt, bobTime, bobAmt) {
     for (const k in this.meshes) this.meshes[k].visible = false;
     this.camera.position.copy(this.mainCamera.position); this.camera.quaternion.copy(this.mainCamera.quaternion);
-    if (view.dead || this.hidden) { this.muzzleLight.intensity = 0; this.flashSprite.material.opacity = 0; return; }
+    for (const m of this.flashMats) m.opacity = 0;
+    if (view.dead || this.hidden) { this.muzzleLight.intensity = 0; return; }
     const w = p.weapon;
     const holder = this.ensure(w);
     holder.visible = true;
+    const model = holder.userData.model, live = model.userData.live;
+    const firing = now < this.firingUntil;
     // switching: drop / raise
     let drop = 0;
     if (p.weaponState === 'dropping') drop = 1 - Math.max(0, p.weaponTime) / WEAPON_DROP_TIME;
@@ -89,16 +110,41 @@ export class ViewModel {
     const k = Math.min(1, dt * 10);
     this.sway[0] += (Math.max(-1.2, Math.min(1.2, -dy * 0.05)) - this.sway[0]) * k;
     this.sway[1] += (Math.max(-1.2, Math.min(1.2, -dp * 0.05)) - this.sway[1]) * k;
-    this.recoil *= Math.pow(0.0008, dt);
+    // recoil springs: the sharp kick decays fast; the rail slide and the RL climb come back slowly
+    this.recoil *= Math.pow(0.0008, dt); this.slide *= Math.pow(0.03, dt); this.climb *= Math.pow(0.01, dt); this.railCharge *= Math.pow(0.15, dt);
     // Q3 bob: figure-8 (x at half frequency of y) scaled by ground speed; idle drift when still
     const bx = Math.sin(bobTime * 0.5) * 0.55 * bobAmt, by = -Math.abs(Math.cos(bobTime * 0.5)) * 0.45 * bobAmt;
-    const ix = Math.sin(now * 0.0011) * 0.12, iy = Math.sin(now * 0.0017) * 0.1;
-    const kick = this.recoil * (w === WEAPONS.RAIL ? 2.2 : w === WEAPONS.ROCKET ? 1.8 : w === WEAPONS.SHOTGUN ? 1.6 : 0.6);
+    const ix = Math.sin(now * 0.0011) * 0.12 + Math.sin(now * 0.0023) * 0.05, iy = Math.sin(now * 0.0017) * 0.1 + Math.cos(now * 0.0031) * 0.04;
+    const kick = this.recoil * (KICK[w] || 0.5) + this.slide * 2.2;
+    // machinegun rattle: a small random shake while the burst lasts
+    const rattle = w === WEAPONS.MACHINEGUN && firing ? 0.25 : 0;
+    const rx = (Math.random() - 0.5) * rattle, ry = (Math.random() - 0.5) * rattle;
     // landing / stairs dip
     const land = view.landDip || 0;
-    holder.position.set(REST.x + this.sway[0] + bx + ix, REST.y - drop * 6 + this.sway[1] + by + iy - land * 0.3, REST.z + kick);
-    // barrel converges slightly toward the crosshair (+yaw turns the muzzle left, toward the screen centre)
-    holder.rotation.set(this.recoil * 0.12 - drop * 0.9 + this.sway[1] * 0.02, 0.07 + this.sway[0] * 0.03, this.sway[0] * 0.02);
+    holder.position.set(REST.x + this.sway[0] + bx + ix + rx, REST.y - drop * 6 + this.sway[1] + by + iy - land * 0.3 + this.climb * 0.6 + ry, REST.z + kick);
+    // barrel converges slightly toward the crosshair (+yaw turns the muzzle left, toward the screen centre); recoil pitches it up
+    holder.rotation.set(this.recoil * 0.12 + this.climb * 0.1 + this.slide * 0.05 - drop * 0.9 + this.sway[1] * 0.02, 0.07 + this.sway[0] * 0.03 + this.recoil * 0.03, this.sway[0] * 0.02 - this.recoil * 0.04);
+    // --- per-weapon live parts ---
+    if (model.userData.blade) { // gauntlet: the blade spins up while the trigger is held, freewheels down after
+      const want = p.attackHeld ? 40 : 0;
+      this.bladeSpin += (want - this.bladeSpin) * Math.min(1, dt * (p.attackHeld ? 6 : 1.5));
+      this.bladeAngle += this.bladeSpin * dt; model.userData.blade.rotation.y = this.bladeAngle;
+    }
+    if (model.userData.pump) { // shotgun: pump cycles back and forward ~180 ms after the shot
+      const t = (now - this.pumpAt) / 320; const s = t > 0 && t < 1 ? Math.sin(t * Math.PI) : 0;
+      model.userData.pump.position.x = 13 - s * 5;
+    }
+    if (live) {
+      if (w === WEAPONS.LIGHTNING) { // core pulses at rest, blazes while the beam is on
+        const pulse = 0.55 + 0.25 * Math.sin(now * 0.012), hot = firing ? 1 : 0;
+        live.core.color.setHex(0xbfe8ff).lerp(_c.setHex(0xffffff), hot * 0.8).multiplyScalar(pulse + hot * 1.2);
+        live.coil.emissiveIntensity = 0.6 + hot * 1.6 + (firing ? Math.random() * 0.5 : 0);
+      } else if (w === WEAPONS.RAIL) { // coil charge glow after a shot, sinking back over ~1 s
+        live.coil.emissiveIntensity = 0.6 + this.railCharge * 2.6;
+        live.core.color.setHex(0x5cff9d).multiplyScalar(0.8 + this.railCharge * 2);
+      } else if (w === WEAPONS.PLASMA) { live.core.color.setHex(0xe8d0ff).multiplyScalar(0.9 + 0.2 * Math.sin(now * 0.02) + (firing ? 0.8 : 0)); live.coil.emissiveIntensity = 0.6 + (firing ? 0.8 : 0); }
+      else if (w === WEAPONS.GAUNTLET) { live.core.color.setHex(0xff9a5c).multiplyScalar(0.8 + this.bladeSpin / 40 * 1.2); }
+    }
     // muzzle point follows the active weapon
     const mz = holder.userData.muzzle;
     this.muzzle.position.copy(holder.position).add(_v.copy(mz).applyEuler(holder.rotation));
@@ -106,11 +152,12 @@ export class ViewModel {
     this.flashSprite.position.copy(this.muzzle.position);
     // muzzle flash: flicker while active
     if (now < this.flashUntil) {
-      this.flashSprite.material.color.setHex(this.flashColor);
-      this.flashSprite.material.opacity = 0.6 + Math.random() * 0.4;
+      const m = this.flashSprite.material;
+      m.color.setHex(this.flashColor).lerp(_c.setHex(0xffffff), 0.35);
+      m.opacity = 0.75 + Math.random() * 0.25;
       const s = this.flashSize * (0.8 + Math.random() * 0.5); this.flashSprite.scale.set(s, s, 1);
-      this.flashSprite.material.rotation = Math.random() * 6.28;
-    } else this.flashSprite.material.opacity = 0;
+      m.rotation = Math.random() * 6.28;
+    }
     this.muzzleLight.intensity *= Math.pow(0.0002, dt);
   }
 }

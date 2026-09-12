@@ -2,12 +2,50 @@
 // into a 32-unit grid so the baked per-vertex lighting (AO + shadowed direct light, see bake.worker.js) can vary
 // across a wall, and faces buried inside neighbouring solid brushes culled so they neither z-fight nor cost fill.
 import * as THREE from 'three';
-import { clipPolygon } from '../../shared/brush.js';
+import { clipPolygon, polygonArea } from '../../shared/brush.js';
 import { pointContents } from '../../shared/trace.js';
 import { getMaterial, MATERIAL_DEFS } from './materials.js';
 
 const GRID = 32;          // subdivision cell size (world units)
 const MIN_SUBDIV = 48;    // faces smaller than this in both directions stay as single polygons
+const FACE_LIFT = 0.5;    // hidden-face test: the face is examined this far outside its own brush
+const COVER_AREA_EPS = 1; // fragments below this area (units^2) are clipping residue, not visible surface
+
+// Does a brush hide the faces buried in it? Only drawn solid brushes do: a trigger, a player clip or an invisible
+// (nodraw / clip material) brush leaves whatever sits behind it in full view.
+export function brushCovers(b) {
+  if (b.nonsolid || (b.flags & 6 /* NODRAW | PLAYERCLIP */)) return false;
+  const def = MATERIAL_DEFS[b.mat || 'wall'];
+  return !(def && def.invisible);
+}
+// Exact hidden-face test. The face polygon, lifted FACE_LIFT off its plane, has every covering brush subtracted from
+// it (convex clipping: the part outside each brush plane is kept, the part inside all of them is dropped); the face
+// is hidden only when nothing with a visible area remains. Sampling points (the old centre + corners heuristic)
+// culled a 224-high wall whose centre and corners happened to sit inside flush glow strips while the rest showed.
+export function faceCovered(brushes, own, poly, lift = FACE_LIFT) {
+  const n = poly.plane.n;
+  let frags = [poly.verts.map((p) => [p[0] + n[0] * lift, p[1] + n[1] * lift, p[2] + n[2] * lift])];
+  const mins = [Infinity, Infinity, Infinity], maxs = [-Infinity, -Infinity, -Infinity];
+  for (const p of frags[0]) for (let i = 0; i < 3; i++) { mins[i] = Math.min(mins[i], p[i]); maxs[i] = Math.max(maxs[i], p[i]); }
+  for (const b of brushes) {
+    if (b === own || !brushCovers(b)) continue;
+    if (b.mins[0] > maxs[0] || b.maxs[0] < mins[0] || b.mins[1] > maxs[1] || b.maxs[1] < mins[1] || b.mins[2] > maxs[2] || b.maxs[2] < mins[2]) continue;
+    const next = [];
+    for (const f of frags) {
+      let inside = f;
+      for (const pl of b.planes) {
+        const out = clipPolygon(inside, { n: [-pl.n[0], -pl.n[1], -pl.n[2]], d: -pl.d }); // the part beyond this plane stays visible
+        if (out.length >= 3 && polygonArea(out) > COVER_AREA_EPS) next.push(out);
+        inside = clipPolygon(inside, pl);
+        if (inside.length < 3) break;
+      }
+      // whatever is left in `inside` lies within the brush: covered
+    }
+    frags = next;
+    if (!frags.length) return true;
+  }
+  return false;
+}
 
 // UV projection axes for a face normal: the two world axes not dominated by the normal (Q3 "world" mapping).
 function axesFor(n) {
@@ -43,7 +81,6 @@ function subdivide(verts, u, v) {
 
 // Build merged geometry groups: Map(materialName -> { positions, normals, uvs, indices }).
 export function buildWorldGeometry(map) {
-  const world = { brushes: map.brushes };
   const groups = new Map();
   let culled = 0;
   for (const b of map.brushes) {
@@ -56,20 +93,8 @@ export function buildWorldGeometry(map) {
     const scale = material.userData.scale || 128;
     for (const poly of b.polys) {
       const n = poly.plane.n;
-      // hidden-face cull: a face buried in neighbouring solid brushes can never be seen. Centre AND every vertex
-      // (pushed just outside the face's own brush) must be inside solid: brushes overlap in real maps, and a face
-      // whose centre alone is covered may still show at its edges.
-      if (!b.nonsolid) {
-        const c = [0, 0, 0]; for (const p of poly.verts) { c[0] += p[0]; c[1] += p[1]; c[2] += p[2]; }
-        c[0] = c[0] / poly.verts.length + n[0] * 0.5; c[1] = c[1] / poly.verts.length + n[1] * 0.5; c[2] = c[2] / poly.verts.length + n[2] * 0.5;
-        let hidden = pointContents(world, c);
-        for (let i = 0; hidden && i < poly.verts.length; i++) {
-          const p = poly.verts[i];
-          // pull the test point slightly toward the centre so shared edges of adjacent brushes still count as covered
-          hidden = pointContents(world, [p[0] * 0.98 + c[0] * 0.02 + n[0] * 0.5, p[1] * 0.98 + c[1] * 0.02 + n[1] * 0.5, p[2] * 0.98 + c[2] * 0.02 + n[2] * 0.5]);
-        }
-        if (hidden) { culled++; continue; }
-      }
+      // hidden-face cull: a face buried in neighbouring drawn solid brushes can never be seen (exact test, see faceCovered)
+      if (!b.nonsolid && faceCovered(map.brushes, b, poly)) { culled++; continue; }
       const [u, v] = axesFor(n);
       // winding: polygons from plane clipping may be either orientation; flip so triangles face along the normal
       const a = poly.verts[0], b2 = poly.verts[1], c2 = poly.verts[2];
