@@ -229,3 +229,15 @@ chamber LOS <= 90%).
 pickups of every major, jump pad use, no stalls; round 3: 14-16 frags, 86-88 pickups, RA and Mega taken every seed,
 13-22 pad launches, stuckSeconds 0). Bots spend 0.8-3.3% of their time on the mezzanines and 1.7-5% on the chamber
 shelves (`.evidence/map_r3/occupancy.json`).
+
+## Map pack
+
+Three duel maps ship; the host picks one in the menu and the guest receives it in the WELCOME handshake.
+
+| Map | Module | Character | Notes |
+|---|---|---|---|
+| Crossfire | `arena_duel.js` | two atria, item control | Mega and Red Armor on opposite sides, upper L-balconies, jump pads |
+| Lava Spire | `lava_spire.js` | vertical, warm | a lava crater with four towers and a railed spire holding Red Armor (320 high); Mega on the tower mezzanine; three jump pads; lava never on a walking route (bots: 0 lava deaths in 180 s duels) |
+| Tight Deck | `tight_deck.js` | compact, cool/tech | aerowalk-style deck on seven height levels (0..224), corridors 96-128 wide, a teleporter from the Mega pit to the junction, no free eye line longer than 731 |
+
+Each map has its own acceptance suite (`tests/map*.test.mjs`): enclosure, bot reachability of every item and spawn, player-box clearance on every nav edge, corridor/ceiling/stair limits, major-item spacing and spawn sightlines, plus map-specific rules (lava crossings, teleporter exit, sightline caps, route verticality).
