@@ -98,6 +98,8 @@ button { flex: 1; background: #1b2233; border: 1px solid #3a4560; color: #fff; p
 button:hover { background: #26304a; } button.primary { background: var(--accent); color: #1a1000; border-color: #ffd28a; } button.primary:hover { background: #ffc46a; }
 details { margin: 8px 0; font-size: 13px; } summary { cursor: pointer; opacity: 0.8; letter-spacing: 1px; }
 .help { font-size: 11px; opacity: 0.55; margin: 14px 0 0; letter-spacing: 0.5px; }
+.panel select { flex: 0 0 160px; background: #0a0d14; border: 1px solid #2c3648; color: #fff; padding: 7px 8px; border-radius: 4px; font-size: 13px; letter-spacing: 1px; }
+.panel .blurb { flex: 1; font-size: 11px; opacity: 0.55; letter-spacing: 0.5px; }
 #room { flex: 1; min-width: 0; background: #0a0d14; border: 1px solid #2c3648; color: #fff; padding: 8px 10px; border-radius: 4px; font-family: Consolas, monospace; font-size: 15px; letter-spacing: 3px; text-transform: uppercase; text-align: center; }
 #room-box { display: flex; align-items: center; gap: 10px; margin: 10px 0; font-size: 12px; letter-spacing: 2px; }
 #room-box b { font-family: Consolas, monospace; font-size: 26px; letter-spacing: 5px; color: var(--accent); }

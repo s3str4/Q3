@@ -1,5 +1,7 @@
 // Client bootstrap: menu, connection modes (server / practice / P2P host / P2P join), fixed-step input loop, render loop.
 import { loadMap } from '../shared/map.js';
+import { MAPS, DEFAULT_MAP } from '../maps/index.js';
+import { MSG, PROTOCOL_VERSION } from '../shared/protocol.js';
 import { TICK_MS, EV } from '../shared/constants.js';
 import { WsTransport, RtcTransport, PeerTransport, makeRoomCode, normalizeRoomCode } from './net/transport.js';
 import { ClientGame } from './net/clientgame.js';
@@ -24,6 +26,11 @@ $('sens').oninput = (e) => { settings.sens = +e.target.value; $('sens-v').textCo
 $('fov').oninput = (e) => { settings.fov = +e.target.value; $('fov-v').textContent = settings.fov; if (renderer) renderer.setFov(settings.fov); save(); };
 $('vol').oninput = (e) => { settings.vol = +e.target.value; audio.setVolume(settings.vol); save(); };
 $('opt-cshair').onchange = (e) => { settings.bigCrosshair = e.target.checked; $('crosshair').classList.toggle('large', settings.bigCrosshair); save(); };
+// map selector (host side; the guest learns the map from the WELCOME handshake)
+for (const mp of MAPS) { const o = document.createElement('option'); o.value = mp.id; o.textContent = mp.title; $('map').appendChild(o); }
+if (!MAPS.some((mp) => mp.id === settings.map)) settings.map = DEFAULT_MAP;
+$('map').value = settings.map; $('map-blurb').textContent = (MAPS.find((mp) => mp.id === settings.map) || {}).blurb || '';
+$('map').onchange = (e) => { settings.map = e.target.value; $('map-blurb').textContent = (MAPS.find((mp) => mp.id === settings.map) || {}).blurb || ''; save(); };
 $('opt-interp').onchange = (e) => { settings.interp = +e.target.value; if (cg) cg.interpSnaps = settings.interp; save(); };
 let staticPage = false; // true when the page is not served by a game server (GitHub Pages etc.)
 const NO_SERVER_MSG = 'This page has no game server behind it. To play someone: HOST GAME and send the room code (or JOIN with theirs). To join a dedicated server, enter its address (ws://host:27960) above.';
@@ -71,7 +78,7 @@ async function start(mode) {
   status('loading...');
   try {
     audio.init(); audio.resume(); audio.setVolume(settings.vol);
-    let transport, mapName = 'arena_duel', gameMode = 'duel';
+    let transport, mapName = settings.map || DEFAULT_MAP, gameMode = 'duel';
     if (mode.kind === 'ws') {
       if (!mode.url) throw new Error('no server address: enter ws://host:27960, or use HOST GAME / JOIN with a room code');
       transport = new WsTransport(normalizeWs(mode.url));
@@ -109,6 +116,7 @@ async function start(mode) {
       try { await pt.join(code, (msg) => { $('p2p-status').textContent = msg; }); $('p2p-status').textContent = 'connected to the host, loading the arena...'; }
       catch (e) { const t = e && e.type; throw new Error(t === 'peer-unavailable' ? 'no host found for room ' + code + ' (check the code; the host must have clicked HOST GAME and keep the page open)' : t === 'timeout' ? 'the host was found but no network path opened in 30 s (ICE ' + e.iceState + '). Retry once; if it persists, one side is behind a NAT/firewall that blocks direct UDP: use a dedicated server (port forward or tunnel, see README) instead' : t === 'network' || t === 'server-error' || t === 'socket-error' ? 'cannot reach the signaling server (' + t + '): a firewall or proxy blocks wss://0.peerjs.com; use the manual exchange below or a server' : 'could not connect (' + (t || e.message) + ', ICE ' + (e.iceState || '?') + '); try again or use a server'); }
       transport = pt;
+      ({ map: mapName, mode: gameMode } = await handshake(transport, settings.name));
     } else if (mode.kind === 'host') {
       const map = await loadMap(mapName);
       host = new BrowserHost(map, { mode: gameMode, log: (...m) => console.log('[host]', ...m) });
@@ -126,6 +134,7 @@ async function start(mode) {
       $('p2p-code').value = ans; $('btn-copy-code').classList.remove('hidden'); $('btn-copy-link').classList.add('hidden'); $('p2p-status').textContent = 'Send this answer code back to the host. Waiting for connection...';
       await new Promise((res, rej) => { rtc.onopen = res; setTimeout(() => rej(new Error('P2P connection timed out after 5 minutes (host did not accept the answer, or both sides are behind symmetric NAT)')), 300000); });
       transport = rtc;
+      ({ map: mapName, mode: gameMode } = await handshake(transport, settings.name));
     }
     const map = await loadMap(mapName);
     renderer = renderer || new Renderer(canvas);
@@ -151,6 +160,17 @@ async function start(mode) {
     $('click-to-play').onclick = () => { input.lock(); audio.resume(); };
     loop();
   } catch (e) { console.error(e); status('failed: ' + e.message); running = false; }
+}
+// One-shot JOIN -> WELCOME exchange to learn which map/mode the host runs (the session resends WELCOME on the
+// client's later JOIN, so this costs nothing). Falls back to the default map if the host never answers.
+function handshake(transport, name) {
+  return new Promise((resolve) => {
+    const prev = transport.onmessage;
+    const done = (v) => { transport.onmessage = prev; clearTimeout(t); resolve(v); };
+    const t = setTimeout(() => done({ map: DEFAULT_MAP, mode: 'duel' }), 8000);
+    transport.onmessage = (msg) => { if (msg && msg.t === MSG.WELCOME) done({ map: msg.map || DEFAULT_MAP, mode: msg.mode || 'duel' }); else if (msg && msg.t === MSG.KICK) done({ map: DEFAULT_MAP, mode: 'duel' }); };
+    transport.send({ t: MSG.JOIN, name, v: PROTOCOL_VERSION });
+  });
 }
 function normalizeWs(u) { if (!u) return defaultServer(); if (!/^wss?:\/\//.test(u)) u = 'ws://' + u; return u; }
 function stop(reason) { running = false; hud.hide(); $('menu').classList.remove('hidden'); status(reason); if (cg) { cg.close(); } if (host) host.close(); cg = null; host = null; }
@@ -201,5 +221,5 @@ function loop() {
   audio.update(cg, now);
 }
 
-function load() { try { return { name: 'player', server: '', sens: 5, fov: 100, vol: 0.8, interp: 2, bigCrosshair: false, ...JSON.parse(localStorage.getItem('arena-settings') || '{}') }; } catch { return { name: 'player', server: '', sens: 5, fov: 100, vol: 0.8, interp: 2 }; } }
+function load() { try { return { name: 'player', server: '', sens: 5, fov: 100, vol: 0.8, interp: 2, bigCrosshair: false, map: 'arena_duel', ...JSON.parse(localStorage.getItem('arena-settings') || '{}') }; } catch { return { name: 'player', server: '', sens: 5, fov: 100, vol: 0.8, interp: 2 }; } }
 function save() { try { localStorage.setItem('arena-settings', JSON.stringify(settings)); } catch {} }
