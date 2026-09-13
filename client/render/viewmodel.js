@@ -7,14 +7,17 @@
 import * as THREE from 'three';
 import { WEAPONS, WEAPON_DROP_TIME, WEAPON_RAISE_TIME } from '../../shared/constants.js';
 import { makeWeaponMesh, weaponColor } from './weapons.js';
+import { skinMaterials, skinFor } from './playermodel.js';
 import { getSheet } from './particles.js';
 
-const SCALE = 0.4;
+const SCALE = 0.46;
 // per-weapon scale on top of SCALE: the fat RL tube and the tall LG (rings + rods) would otherwise exceed the 25%
 // screen-height budget that keeps the gun out of the way
 const WEAPON_SCALE = { [WEAPONS.ROCKET]: 0.78, [WEAPONS.LIGHTNING]: 0.88, [WEAPONS.RAIL]: 0.92, [WEAPONS.PLASMA]: 0.9, [WEAPONS.GAUNTLET]: 1.1 };
 // rest pose in camera space (+X right, +Y up, -Z forward): low-right, ~20% of screen height at the 90-degree weapon FOV
-const REST = new THREE.Vector3(9.5, -10.5, -40);
+// Q3 cg_gun placement: the weapon sits low-right and close enough that its stock exits the frame at the bottom-right
+// corner, held by a forearm that also runs off-screen, so it never reads as a gun floating in mid-air.
+const REST = new THREE.Vector3(11.5, -12.5, -33);
 const _v = new THREE.Vector3(), _w = new THREE.Vector3(), _f = new THREE.Vector3(), _c = new THREE.Color();
 const KICK = { [WEAPONS.RAIL]: 2.6, [WEAPONS.ROCKET]: 2.0, [WEAPONS.SHOTGUN]: 1.8, [WEAPONS.PLASMA]: 0.5, [WEAPONS.MACHINEGUN]: 0.45, [WEAPONS.LIGHTNING]: 0.15, [WEAPONS.GAUNTLET]: 0.3 };
 const FLASH_MS = { [WEAPONS.LIGHTNING]: 60, [WEAPONS.RAIL]: 150, [WEAPONS.ROCKET]: 80, [WEAPONS.SHOTGUN]: 80, [WEAPONS.PLASMA]: 50, [WEAPONS.MACHINEGUN]: 45 };
@@ -43,6 +46,14 @@ export class ViewModel {
     this.current = 0; this.recoil = 0; this.slide = 0; this.climb = 0; this.sway = [0, 0]; this.lastYaw = 0; this.lastPitch = 0; this.flashUntil = 0; this.flashColor = 0xffffff; this.hidden = false;
     this.firingUntil = 0; this.lastFireAt = -1e9; this.lastFireWeapon = 0; this.railCharge = 0; this.bladeSpin = 0; this.bladeAngle = 0; this.pumpAt = -1e9;
     this.muzzle = new THREE.Object3D(); this.rig.add(this.muzzle);
+    this.armMats = skinMaterials('sarge', 0x4ab3ff); this.armSkin = 'sarge';
+  }
+  // called with the local player's name so the arms wear the same skin as the third-person model
+  setSkin(name, id) {
+    const skin = skinFor(name, id);
+    if (skin === this.armSkin) return;
+    this.armSkin = skin; this.armMats = skinMaterials(skin, 0x4ab3ff);
+    for (const k in this.meshes) { this.rig.remove(this.meshes[k]); delete this.meshes[k]; }
   }
   ensure(w) {
     if (!this.meshes[w]) {
@@ -52,6 +63,26 @@ export class ViewModel {
       m.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(new THREE.Vector3(0, 0, -1), new THREE.Vector3(-1, 0, 0), new THREE.Vector3(0, 1, 0)));
       holder.userData.muzzle = new THREE.Vector3(...m.userData.muzzle).applyQuaternion(m.quaternion);
       holder.userData.model = m;
+      // first-person arms in holder space (+X right, +Y up, -Z forward): a right forearm from the grip toward the
+      // bottom-right corner (off-screen), a hand on the grip, and for two-handed weapons a left hand under the fore-end
+      const arms = new THREE.Group(); holder.add(arms); holder.userData.arms = arms;
+      const K = SCALE / 0.4;
+      const gripPos = new THREE.Vector3(0.3, -5.2 * K, 1.5);
+      const toCorner = new THREE.Vector3(10, -11, 12);
+      const fore = new THREE.Mesh(new THREE.CylinderGeometry(1.7, 2.2, toCorner.length(), 10), this.armMats.suit);
+      fore.position.copy(gripPos).addScaledVector(toCorner, 0.5); fore.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), toCorner.clone().normalize()); arms.add(fore);
+      const cuff = new THREE.Mesh(new THREE.CylinderGeometry(2.4, 2.4, 2.2, 10), this.armMats.armor);
+      cuff.position.copy(gripPos).addScaledVector(toCorner, 0.28); cuff.quaternion.copy(fore.quaternion); arms.add(cuff);
+      const hand = new THREE.Mesh(new THREE.BoxGeometry(3.2, 4.6, 3.4), this.armMats.flesh); hand.position.copy(gripPos).add(new THREE.Vector3(0.6, 0.4, 0.4)); hand.rotation.set(0.2, 0, -0.3); arms.add(hand);
+      for (let i = 0; i < 3; i++) { const f = new THREE.Mesh(new THREE.BoxGeometry(1.1, 1.1, 2.6), this.armMats.flesh); f.position.copy(hand.position).add(new THREE.Vector3(-1.2 + i * 1.1, -0.6, -1.9)); f.rotation.x = -0.5; arms.add(f); }
+      if (w !== WEAPONS.GAUNTLET) {
+        const lh = new THREE.Vector3(-0.6, -4.6 * K, -7.8 * K);
+        const lhand = new THREE.Mesh(new THREE.BoxGeometry(3.6, 2.2, 4.6), this.armMats.flesh); lhand.position.copy(lh); lhand.rotation.set(0.15, 0.25, 0.1); arms.add(lhand);
+        const lTo = new THREE.Vector3(-3.5, -13, 7);
+        const lfore = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 2.0, lTo.length(), 10), this.armMats.suit);
+        lfore.position.copy(lh).addScaledVector(lTo, 0.5); lfore.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), lTo.clone().normalize()); arms.add(lfore);
+        const lcuff = new THREE.Mesh(new THREE.CylinderGeometry(2.1, 2.1, 2, 10), this.armMats.armor); lcuff.position.copy(lh).addScaledVector(lTo, 0.3); lcuff.quaternion.copy(lfore.quaternion); arms.add(lcuff);
+      }
       holder.visible = false; this.rig.add(holder); this.meshes[w] = holder;
     }
     return this.meshes[w];
@@ -95,6 +126,7 @@ export class ViewModel {
     for (const m of this.flashMats) m.opacity = 0;
     if (view.dead || this.hidden) { this.muzzleLight.intensity = 0; return; }
     const w = p.weapon;
+    if (p.name) this.setSkin(p.name, p.id);
     const holder = this.ensure(w);
     holder.visible = true;
     const model = holder.userData.model, live = model.userData.live;

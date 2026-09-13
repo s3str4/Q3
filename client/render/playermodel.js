@@ -76,7 +76,7 @@ function skinTextures(name) {
 const SKIN_MATS = {};
 // Materials per (skin, team colour): the same program set for every combination (map / map + emissiveMap), so a
 // new skin joining mid-match never compiles a shader.
-function skinMaterials(name, color) {
+export function skinMaterials(name, color) {
   const key = name + ':' + color;
   if (SKIN_MATS[key]) return SKIN_MATS[key];
   const sk = SKINS[name], t = skinTextures(name);
