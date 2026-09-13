@@ -461,6 +461,7 @@ export function findPath(nav, from, to) {
   const nodes = nav.nodes;
   if (!nodes.length) return [{ origin: to }];
   const s = nearestNode(nodes, from), e = nearestNode(nodes, to);
+  if (s < 0 || e < 0) { console.warn('[bot] findPath: no nearest node (non-finite origin?)', from, to); return [{ origin: to }]; } // never index nodes[-1]
   const distv = new Array(nodes.length).fill(Infinity), prev = new Array(nodes.length).fill(-1), prevJump = new Array(nodes.length).fill(false);
   distv[s] = 0;
   const open = new Set([s]);

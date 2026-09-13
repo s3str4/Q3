@@ -82,6 +82,16 @@ export const CUE_TRIM = {
 };
 
 const T = CUE_TRIM;
+
+// ---------- announcer ----------
+// Clips live in client/audio/voice/ (built by tools/voice_build.mjs, listed in manifest.json). Every clip is peak-normalized
+// to -1 dBFS by the build, so one trim sets the announcer level against the synthesized cues: 0.5 = -6 dB peak into the
+// limiter, about the level of a nearby rocket explosion and clearly above the pickups.
+export const ANNOUNCER_GAIN = 0.5;
+export const ANNOUNCER_GAP = 0.12;            // s of silence between queued lines
+export const ANNOUNCER_INTERRUPT = new Set(['three', 'two', 'one', 'fight']);   // time-critical: cut whatever is playing
+// Body cues (jump grunt, pain, death) are pitched per skin so the two players do not sound like the same throat.
+export const SKIN_VOICE_PITCH = { sarge: 0.88, visor: 1.0, anarki: 1.14 };
 // Events voiced at the emitting player's position (as opposed to at e.origin of a world point): dropped for a remote player
 // whose position is unknown, see event().
 const BODY_EVENTS = new Set([EV.FIRE, EV.PAIN, EV.DEATH, EV.JUMP, EV.LAND, EV.FOOTSTEP, EV.PICKUP, EV.JUMPPAD, EV.TELEPORT, EV.RESPAWN]);
@@ -99,6 +109,9 @@ export class AudioEngine {
     this.lastOrigin = new Map();   // player id -> last origin seen in any event or snapshot (fallback for body cues of a player missing from cg.remote)
     this.pendingHits = new Map(); this.pendingPain = new Map();   // per-tick damage coalescing (see COALESCE_WINDOW)
     this.painDebounce = new Map();  // target id -> { t: time of the last voiced grunt, health: lowest health seen since (pending tier escalation) }
+    this.voiceBufs = new Map(); this.voiceLoad = null; this.announcerEnabled = true;   // announcer clips (name -> AudioBuffer), see loadVoices()
+    this.announceQueue = []; this.announcing = null;                                     // { name, src, v, endAt } while a line plays
+    this.bodyPitch = 1;                                                                  // per-skin multiplier applied by grunt() (set per event)
     const seed = this.opts.seed;
     this.rand = seed === undefined ? Math.random : (() => { let s = (seed >>> 0) || 1; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; })();
     this.cues = this.buildCueTable();
@@ -127,6 +140,7 @@ export class AudioEngine {
   resume() { if (this.ctx && this.ctx.state === 'suspended' && this.ctx.resume) this.ctx.resume(); }
   setVolume(v) { this.volume = v; if (this.master) this.master.gain.value = v; }
   close() {
+    this.stopAnnounce(); this.announceQueue.length = 0;
     if (!this.ctx) return;
     for (const l of this.lgLoops.values()) l.stop(); this.lgLoops.clear();
     for (const l of this.rocketLoops.values()) l.stop(); this.rocketLoops.clear();
@@ -252,11 +266,12 @@ export class AudioEngine {
   // Vocal grunt: sawtooth glide through three parallel formant filters (throat/mouth resonances). fm0 -> fm1 formant sets.
   grunt(v, t0, t1, o) {
     const ctx = this.ctx; const mix = ctx.createGain(); mix.gain.value = o.peak ?? 1; mix.connect(o.dest || v.in);
-    const src = ctx.createOscillator(); src.type = 'sawtooth'; src.frequency.setValueAtTime(o.f0, t0); src.frequency.exponentialRampToValueAtTime(o.f1, t1);
+    const pk = this.bodyPitch || 1;
+    const src = ctx.createOscillator(); src.type = 'sawtooth'; src.frequency.setValueAtTime(o.f0 * pk, t0); src.frequency.exponentialRampToValueAtTime(o.f1 * pk, t1);
     if (o.vib) { const l = ctx.createOscillator(); l.frequency.value = o.vib.rate; const lg = ctx.createGain(); lg.gain.value = o.vib.depth; l.connect(lg); lg.connect(src.frequency); l.start(t0); l.stop(t1 + 0.02); }
     const g = ctx.createGain(); this.env(g.gain, t0, t1, 1, o.attack ?? 0.02, o.hold ?? 0); src.connect(g);
-    const fm0 = o.formants || [650, 1100, 2500], fm1 = o.formantsEnd || fm0;
-    fm0.forEach((fq, i) => { const f = ctx.createBiquadFilter(); f.type = 'bandpass'; f.Q.value = 6; f.frequency.setValueAtTime(fq, t0); f.frequency.exponentialRampToValueAtTime(fm1[i], t1); const fg = ctx.createGain(); fg.gain.value = i === 0 ? 1 : i === 1 ? 0.6 : 0.3; g.connect(f); f.connect(fg); fg.connect(mix); });
+    const fm0 = o.formants || [650, 1100, 2500], fm1 = o.formantsEnd || fm0; const fk = Math.sqrt(pk); // formants move less than the pitch (a bigger throat, not a faster tape)
+    fm0.forEach((fq, i) => { const f = ctx.createBiquadFilter(); f.type = 'bandpass'; f.Q.value = 6; f.frequency.setValueAtTime(fq * fk, t0); f.frequency.exponentialRampToValueAtTime(fm1[i] * fk, t1); const fg = ctx.createGain(); fg.gain.value = i === 0 ? 1 : i === 1 ? 0.6 : 0.3; g.connect(f); f.connect(fg); fg.connect(mix); });
     // breath: bandpassed noise under the voice
     this.noise(v, t0, t1, { type: 'bandpass', freq: 1600, q: 0.8, peak: (o.breath ?? 0.2), attack: o.attack ?? 0.02, dest: mix });
     src.start(t0); src.stop(t1 + 0.02); this.track(v, src, t1 + 0.02);
@@ -447,6 +462,11 @@ export class AudioEngine {
 
   // ---------- player body cues ----------
   bodyBus(local) { return local ? 'player' : 'enemy'; }
+  pitchFor(id, cg) { // bots carry no skin field: their name is their skin (Sarge / Visor / Anarki), like the renderer does
+    const p = cg && cg.game && cg.game.players && cg.game.players.get(id); if (!p) return 1;
+    const skin = p.skin || Object.keys(SKIN_VOICE_PITCH).find((k) => String(p.name || '').toLowerCase().includes(k));
+    return SKIN_VOICE_PITCH[skin] || 1;
+  }
   jump(origin, local) {
     const v = this.voice(this.bodyBus(local), origin, { local, gain: T.jump }); const t = this.now();
     this.grunt(v, t, t + 0.14, { f0: 200, f1: 150, formants: [650, 1150, 2500], formantsEnd: [500, 900, 2300], peak: 1, attack: 0.012, breath: 0.25 });
@@ -679,6 +699,49 @@ export class AudioEngine {
     return v;
   }
 
+  // ---------- announcer (voice pack) ----------
+  // Fetches manifest.json + every clip relative to this module (works from the dev server and from the static build).
+  // Missing clips are not an error: announce() falls back to the synthesized cue where one exists (fight chord, countdown beep).
+  loadVoices(base = new URL('./voice/', import.meta.url)) {
+    if (this.voiceLoad) return this.voiceLoad;
+    this.voiceLoad = (async () => {
+      const man = await (await fetch(new URL('manifest.json', base))).json();
+      await Promise.all(Object.entries(man).map(async ([name, m]) => {
+        try { const ab = await (await fetch(new URL(m.file, base))).arrayBuffer(); this.voiceBufs.set(name, await this.ctx.decodeAudioData(ab)); }
+        catch (err) { console.warn('[audio] voice clip failed', name, err); }
+      }));
+      return this.voiceBufs.size;
+    })();
+    return this.voiceLoad;
+  }
+  hasVoice(name) { return this.voiceBufs.has(name); }
+  // Queue an announcer line. Lines play one after another (Q3 stacks its reward sounds too); time-critical ones
+  // (countdown, fight) cut whatever is playing. Returns false when the clip is unavailable (caller may fall back).
+  announce(name, opts = {}) {
+    if (!this.enabled || !this.announcerEnabled) return false;
+    const buf = this.voiceBufs.get(name); if (!buf) return false;
+    const interrupt = opts.interrupt ?? ANNOUNCER_INTERRUPT.has(name);
+    if (interrupt) { this.stopAnnounce(); this.announceQueue.length = 0; }
+    this.announceQueue.push({ name, buf, delay: opts.delay || 0 });
+    this.pumpAnnounce();
+    return true;
+  }
+  stopAnnounce() {
+    const a = this.announcing; if (!a) return;
+    const t = this.now(); a.v.in.gain.cancelScheduledValues(t); a.v.in.gain.setTargetAtTime(0, t, 0.01);
+    try { a.src.stop(t + 0.05); } catch { /* already stopped */ }
+    clearTimeout(a.timer); this.announcing = null;
+  }
+  pumpAnnounce() {
+    if (this.announcing || !this.announceQueue.length) return;
+    const { name, buf, delay } = this.announceQueue.shift();
+    const v = this.voice('ui', null, { gain: ANNOUNCER_GAIN }); const t = this.now() + delay;
+    const src = this.ctx.createBufferSource(); src.buffer = buf; src.connect(v.in); src.start(t); this.track(v, src, t + buf.duration);
+    const a = { name, src, v, endAt: t + buf.duration };
+    a.timer = setTimeout(() => { if (this.announcing === a) { this.announcing = null; this.pumpAnnounce(); } }, Math.max(0, (delay + buf.duration + ANNOUNCER_GAP) * 1000));
+    this.announcing = a; this.counters.announced = (this.counters.announced || 0) + 1;
+  }
+
   // ---------- cue table (name -> trigger) used by tools/audio_measure.mjs and by tests ----------
   buildCueTable() {
     const W = WEAPONS;
@@ -725,6 +788,7 @@ export class AudioEngine {
     // never seen in an event) the cue is dropped rather than played non-spatially at own-cue level (a phantom "step behind
     // you" on top of you). Otherwise remember where the player was for the next event that carries no origin.
     if (!local && e.id) { if (!origin) { if (BODY_EVENTS.has(e.type)) { this.counters.dropped++; return; } } else this.lastOrigin.set(e.id, origin); }
+    this.bodyPitch = BODY_EVENTS.has(e.type) ? this.pitchFor(e.id, cg) : 1;
     switch (e.type) {
       case EV.FIRE: if (e.weapon === WEAPONS.LIGHTNING) this.lgStart(e.id, origin, local); else this.fire(e.weapon, origin, local); break;
       case EV.EXPLODE: this.explode(e.weapon, e.origin); break;
@@ -749,11 +813,17 @@ export class AudioEngine {
       case EV.RESPAWN: this.painDebounce.delete(e.id); this.teleport(origin, local); break;
       case EV.WEAPON_CHANGE: if (local) this.weaponChange(); break;
       case EV.NOAMMO: if (local) this.noAmmo(); break;
-      case EV.COUNTDOWN: this.countdown(e.seconds); break;
-      case EV.MATCH_START: case EV.ROUND_START: this.fight(); break;
+      case EV.COUNTDOWN: { const n = ['', 'one', 'two', 'three'][e.seconds]; if (!(n && this.announce(n))) this.countdown(e.seconds); break; }
+      case EV.MATCH_START: case EV.ROUND_START: if (!this.announce('fight')) this.fight(); break;
       case EV.ROUND_END: if (e.winner != null) this.fanfare(e.winner === cg.localId); break;
-      case EV.MATCH_END: this.fanfare(e.winner === cg.localId); break;
-      case EV.MAJOR_WARN: this.alert(); break;
+      case EV.MATCH_END: this.fanfare(e.winner === cg.localId); if (e.winner != null) this.announce(e.winner === cg.localId ? 'you_win' : 'you_lose', { delay: 1.1 }); break;
+      case EV.MAJOR_WARN: this.alert(); if (/sudden death/i.test(e.text || '')) this.announce('sudden_death', { delay: 0.4 }); break;
+      // announcer: medals go to the player who earned them (HUMILIATION to the victim too, as in Q3), lead changes to the
+      // player concerned, frag / time warnings to everyone. Voiced only, the HUD draws the medal.
+      case EV.AWARD: if (local || (e.award === 'humiliation' && e.target === cg.localId)) this.announce(e.award, { delay: 0.25 }); break;
+      case EV.LEAD: if (local) this.announce({ taken: 'taken_lead', lost: 'lost_lead', tied: 'tied_lead' }[e.status], { delay: 0.6 }); break;
+      case EV.FRAGS_LEFT: this.announce(['', 'one_frag', 'two_frags', 'three_frags'][e.left], { delay: 0.6 }); break;
+      case EV.TIME_WARN: this.announce(e.minutes === 1 ? 'one_minute' : 'five_minute'); break;
     }
   }
   // ---------- per-tick damage coalescing + per-target pain debounce ----------

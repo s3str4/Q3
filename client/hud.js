@@ -11,6 +11,14 @@ const WSHORT = { [WEAPONS.GAUNTLET]: 'GA', [WEAPONS.MACHINEGUN]: 'MG', [WEAPONS.
 const KEYS = { [WEAPONS.GAUNTLET]: 1, [WEAPONS.MACHINEGUN]: 2, [WEAPONS.SHOTGUN]: 3, [WEAPONS.ROCKET]: 4, [WEAPONS.LIGHTNING]: 5, [WEAPONS.RAIL]: 6, [WEAPONS.PLASMA]: 7 };
 const SHORT = { [WEAPONS.GAUNTLET]: 'GAUNTLET', [WEAPONS.MACHINEGUN]: 'MACHINEGUN', [WEAPONS.SHOTGUN]: 'SHOTGUN', [WEAPONS.ROCKET]: 'ROCKETS', [WEAPONS.LIGHTNING]: 'LIGHTNING', [WEAPONS.RAIL]: 'RAILGUN', [WEAPONS.PLASMA]: 'PLASMA' };
 const WCOL = { [WEAPONS.ROCKET]: '#ff6a3a', [WEAPONS.RAIL]: '#5cff9d', [WEAPONS.LIGHTNING]: '#bfe8ff', [WEAPONS.SHOTGUN]: '#ffc86a', [WEAPONS.PLASMA]: '#b26cff', [WEAPONS.MACHINEGUN]: '#ffe680', [WEAPONS.GAUNTLET]: '#ff9a5c' };
+// Announcer medals (Q3 rewards): colour + glyph, drawn in the #medal badge and as mini badges on the end screen.
+const MEDAL_SVG = {
+  excellent: '<svg viewBox="0 0 32 32"><path d="M16 2l4.1 8.6 9.4 1.2-6.9 6.5 1.8 9.3L16 23l-8.4 4.6 1.8-9.3-6.9-6.5 9.4-1.2z"/></svg>',
+  impressive: '<svg viewBox="0 0 32 32"><path d="M16 3a13 13 0 1 0 0 26 13 13 0 0 0 0-26zm0 4a9 9 0 1 1 0 18 9 9 0 0 1 0-18zm0 5a4 4 0 1 0 0 8 4 4 0 0 0 0-8z"/></svg>',
+  humiliation: '<svg viewBox="0 0 32 32"><path d="M8 13h4V6h3v7h2V5h3v8h2V7h3v12c0 5-3.5 8-8 8s-9-3-9-9v-5z"/></svg>',
+  perfect: '<svg viewBox="0 0 32 32"><path d="M13 24L5 16l3-3 5 5L24 7l3 3z"/></svg>',
+};
+const MEDAL_COLOR = { excellent: '#ffd23a', impressive: '#5cd6ff', humiliation: '#ff4a4a', perfect: '#7dff7d' };
 const ICOL = { mega: '#3d8cff', armorRed: '#ff3d3d', armorYellow: '#ffd23a', weaponRocket: WCOL[WEAPONS.ROCKET], weaponRail: WCOL[WEAPONS.RAIL], weaponLightning: WCOL[WEAPONS.LIGHTNING] };
 const MOD_TEXT = { [WEAPONS.GAUNTLET]: 'was pummeled by', [WEAPONS.MACHINEGUN]: 'was machinegunned by', [WEAPONS.SHOTGUN]: 'was gunned down by', [WEAPONS.ROCKET]: 'ate a rocket from', [WEAPONS.LIGHTNING]: 'was electrocuted by', [WEAPONS.RAIL]: 'was railed by', [WEAPONS.PLASMA]: 'was melted by', fall: 'cratered', lava: 'was burned to a crisp', telefrag: 'was telefragged by' };
 // ammo icon shapes per weapon (SVG paths in a 32x32 box)
@@ -176,6 +184,12 @@ export class Hud {
       case EV.ROUND_END: { const w = e.wins || {}; const mine = w[cg.localId] || 0; const theirs = Object.entries(w).filter(([id]) => +id !== cg.localId).reduce((s, [, n]) => s + n, 0);
         this.center(e.winner === cg.localId ? 'ROUND WON' : e.winner == null ? 'ROUND DRAW' : 'ROUND LOST', 1800, `${mine} - ${theirs}`); break; }
       case EV.MAJOR_WARN: this.center(e.text, 2500); break;
+      // announcer: the medal badge for the player who earned it (the victim of a gauntlet frag sees it too), lead / frag /
+      // time calls as a short sub-line so they read even with the voice off
+      case EV.AWARD: if (e.id === cg.localId || (e.award === 'humiliation' && e.target === cg.localId)) this.medal(e.award, e.id === cg.localId ? e.count : 0); break;
+      case EV.LEAD: if (e.id === cg.localId) this.later(700, () => this.center('', 1500, { taken: 'YOU HAVE TAKEN THE LEAD', lost: 'YOU HAVE LOST THE LEAD', tied: 'TIED FOR THE LEAD' }[e.status])); break;
+      case EV.FRAGS_LEFT: this.later(700, () => this.center('', 1500, e.left === 1 ? '1 FRAG LEFT' : `${e.left} FRAGS LEFT`)); break;
+      case EV.TIME_WARN: this.center('', 2000, `${e.minutes} MINUTE WARNING`); break;
     }
   }
   // ---- end of match screen ----
@@ -190,10 +204,12 @@ export class Hud {
     const ids = Object.keys(e.scores || {}).map(Number).sort((a, b) => (e.scores[b].frags - e.scores[a].frags) || (e.scores[b].rounds - e.scores[a].rounds));
     const usedW = WEAPON_ORDER.filter((w) => ids.some((id) => (e.scores[id].byWeapon || {})[w]));
     const pct = (h, s) => (s ? Math.round(100 * h / s) : 0);
-    const head = `<tr><th>PLAYER</th>${e.mode === 'arena' ? '<th>ROUNDS</th>' : ''}<th>FRAGS</th><th>DEATHS</th><th>DMG</th><th>ACC</th>${usedW.map((w) => `<th title="${WEAPON_DEFS[w].name}">${WSHORT[w]}</th>`).join('')}</tr>`;
+    const anyAwards = ids.some((id) => Object.values(e.scores[id].awards || {}).some((n) => n > 0));
+    const medals = (s) => Object.entries(s.awards || {}).filter(([, n]) => n > 0).map(([a, n]) => `<span class="mini-medal" style="--mc:${MEDAL_COLOR[a] || '#fff'}" title="${esc(a)}">${MEDAL_SVG[a] || ''}${n}</span>`).join('');
+    const head = `<tr><th>PLAYER</th>${e.mode === 'arena' ? '<th>ROUNDS</th>' : ''}<th>FRAGS</th><th>DEATHS</th><th>DMG</th><th>ACC</th>${usedW.map((w) => `<th title="${WEAPON_DEFS[w].name}">${WSHORT[w]}</th>`).join('')}${anyAwards ? '<th>MEDALS</th>' : ''}</tr>`;
     const rows = ids.map((id) => { const s = e.scores[id]; const cls = [id === e.winner ? 'winner' : '', id === me ? 'me' : ''].join(' ').trim();
       const wcells = usedW.map((w) => { const b = (s.byWeapon || {})[w]; return b ? `<td class="w">${pct(b.hits, b.shots)}%<small>${b.hits}/${b.shots}</small></td>` : '<td class="w">-</td>'; }).join('');
-      return `<tr class="${cls}"><td>${esc(s.name)}${s.bot ? ' (bot)' : ''}</td>${e.mode === 'arena' ? `<td>${s.rounds}</td>` : ''}<td>${s.frags}</td><td>${s.deaths}</td><td>${s.dmg}</td><td>${pct(s.hits, s.shots)}%</td>${wcells}</tr>`; }).join('');
+      return `<tr class="${cls}"><td>${esc(s.name)}${s.bot ? ' (bot)' : ''}</td>${e.mode === 'arena' ? `<td>${s.rounds}</td>` : ''}<td>${s.frags}</td><td>${s.deaths}</td><td>${s.dmg}</td><td>${pct(s.hits, s.shots)}%</td>${wcells}${anyAwards ? `<td>${medals(s)}</td>` : ''}</tr>`; }).join('');
     $('es-table').innerHTML = head + rows;
     // next match controls start from the current map / mode; the selects only send a vote when the player changes them
     const allowed = cg.maps || MAPS.map((m) => m.id);
@@ -237,6 +253,14 @@ export class Hud {
     if (force || s !== this.cache.esAuto) { this.cache.esAuto = s; $('es-auto').textContent = v.open ? `both players ready starts the next match now · otherwise it starts in ${s} s` : 'starting...'; }
   }
   pickup(text) { const el = $('pickup-msg'); el.textContent = text.toUpperCase(); el.style.opacity = 1; clearTimeout(this.pickupTimer); this.pickupTimer = setTimeout(() => (el.style.opacity = 0), 900); }
+  later(ms, fn) { setTimeout(fn, ms); }
+  medal(award, count = 0) {
+    const el = $('medal'); el.style.setProperty('--mc', MEDAL_COLOR[award] || '#fff');
+    el.querySelector('.medal-icon').innerHTML = MEDAL_SVG[award] || '';
+    el.querySelector('.medal-text').innerHTML = esc(award.toUpperCase()) + (count > 1 ? `<small>x${count}</small>` : '');
+    el.classList.remove('show'); void el.offsetWidth; el.classList.add('show');
+    clearTimeout(this.medalTimer); this.medalTimer = setTimeout(() => el.classList.remove('show'), 2200);
+  }
   center(text, ms, sub = '') { const el = $('center-msg'); el.innerHTML = esc(text) + (sub ? `<span class="sub">${esc(sub)}</span>` : ''); el.style.opacity = 1; clearTimeout(this.centerTimer); this.centerTimer = setTimeout(() => (el.style.opacity = 0), ms); }
   hit(dmg) { const hm = $('hitmarker'); hm.classList.remove('show'); void hm.offsetWidth; hm.classList.add('show'); const ch = $('crosshair'); ch.classList.add('hit'); setTimeout(() => ch.classList.remove('hit'), 150); }
   damageFlash(dmg) { this.flash('damage-flash', Math.min(1, 0.3 + dmg / 90), 100); }

@@ -175,6 +175,18 @@ grate, mid-air -> plate, no world -> plate, a remote hard LAND with an origin ->
 | Win / lose / overtime | rising C-E-G-C triangle arpeggio + chord / falling G-F-Eb-C detuned; overtime alert: two 520 Hz squares | |
 | Ambient | lowpass 160 Hz noise + 48 Hz drone with 0.08 Hz LFO, **-40.1 dBFS RMS** | bed only |
 
+## Announcer (voice pack)
+
+`client/audio/voice/*.wav` + `manifest.json`, built by `tools/voice_build.mjs` (see the README section "Announcer and
+voices" for the treatment). `AudioEngine.loadVoices()` fetches the manifest and decodes every clip once (relative to the
+module, so the dev server and the static build both work); `announce(name, { delay, interrupt })` queues a line on the
+`ui` bus at `ANNOUNCER_GAIN` (0.5: the clips are peak-normalized to -1 dBFS by the build, so that is -7 dBFS into the
+limiter, about a nearby rocket explosion). Lines play one after another with `ANNOUNCER_GAP` (120 ms) between them, the
+way Q3 stacks reward sounds; the countdown numbers and "fight" cut whatever is playing (`ANNOUNCER_INTERRUPT`). When a
+clip is missing (fetch failed, voice pack not built) the synthesized cue plays instead: countdown beep, fight chord. The
+pack is not part of the measured cue table because it is not synthesized. Body cues (jump, pain, death grunts) are
+pitched per skin by `SKIN_VOICE_PITCH` (Sarge 0.88, Visor 1.0, Anarki 1.14; formants move by the square root of that).
+
 ## Loudness rules (asserted by `tools/audio_measure.mjs`, 2252 checks, all passing)
 
 1. No clipping: every render (including all directional variants) peaks <= -0.5 dBFS; stress mix <= -0.3 dBFS

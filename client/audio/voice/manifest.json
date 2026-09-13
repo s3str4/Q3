@@ -1,0 +1,107 @@
+{
+ "welcome": {
+  "file": "welcome.wav",
+  "text": "Welcome to the arena.",
+  "ms": 1439
+ },
+ "prepare": {
+  "file": "prepare.wav",
+  "text": "Prepare to fight.",
+  "ms": 1336
+ },
+ "three": {
+  "file": "three.wav",
+  "text": "Three.",
+  "ms": 908
+ },
+ "two": {
+  "file": "two.wav",
+  "text": "Two.",
+  "ms": 849
+ },
+ "one": {
+  "file": "one.wav",
+  "text": "One.",
+  "ms": 973
+ },
+ "fight": {
+  "file": "fight.wav",
+  "text": "Fight!",
+  "ms": 965
+ },
+ "excellent": {
+  "file": "excellent.wav",
+  "text": "Excellent!",
+  "ms": 1109
+ },
+ "impressive": {
+  "file": "impressive.wav",
+  "text": "Impressive!",
+  "ms": 1269
+ },
+ "humiliation": {
+  "file": "humiliation.wav",
+  "text": "Humiliation!",
+  "ms": 1462
+ },
+ "perfect": {
+  "file": "perfect.wav",
+  "text": "Perfect!",
+  "ms": 1153
+ },
+ "taken_lead": {
+  "file": "taken_lead.wav",
+  "text": "You have taken the lead.",
+  "ms": 1478
+ },
+ "lost_lead": {
+  "file": "lost_lead.wav",
+  "text": "You have lost the lead.",
+  "ms": 1459
+ },
+ "tied_lead": {
+  "file": "tied_lead.wav",
+  "text": "Tied for the lead.",
+  "ms": 1281
+ },
+ "one_minute": {
+  "file": "one_minute.wav",
+  "text": "One minute warning.",
+  "ms": 1405
+ },
+ "five_minute": {
+  "file": "five_minute.wav",
+  "text": "Five minute warning.",
+  "ms": 1467
+ },
+ "one_frag": {
+  "file": "one_frag.wav",
+  "text": "One frag left.",
+  "ms": 1345
+ },
+ "two_frags": {
+  "file": "two_frags.wav",
+  "text": "Two frags left.",
+  "ms": 1419
+ },
+ "three_frags": {
+  "file": "three_frags.wav",
+  "text": "Three frags left.",
+  "ms": 1424
+ },
+ "sudden_death": {
+  "file": "sudden_death.wav",
+  "text": "Sudden death.",
+  "ms": 1192
+ },
+ "you_win": {
+  "file": "you_win.wav",
+  "text": "You win.",
+  "ms": 976
+ },
+ "you_lose": {
+  "file": "you_lose.wav",
+  "text": "You lose.",
+  "ms": 1100
+ }
+}

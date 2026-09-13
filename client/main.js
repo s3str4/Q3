@@ -33,6 +33,8 @@ $('sens').oninput = (e) => { settings.sens = +e.target.value; $('sens-v').textCo
 $('fov').oninput = (e) => { settings.fov = +e.target.value; $('fov-v').textContent = settings.fov; if (renderer) renderer.setFov(settings.fov); save(); };
 $('vol').oninput = (e) => { settings.vol = +e.target.value; audio.setVolume(settings.vol); save(); };
 $('opt-cshair').onchange = (e) => { settings.bigCrosshair = e.target.checked; $('crosshair').classList.toggle('large', settings.bigCrosshair); save(); };
+$('opt-announcer').checked = settings.announcer !== false;
+$('opt-announcer').onchange = (e) => { settings.announcer = e.target.checked; audio.announcerEnabled = settings.announcer; if (!settings.announcer) audio.stopAnnounce(); save(); };
 $('opt-demos').checked = settings.recordDemos !== false;
 $('opt-demos').onchange = (e) => { settings.recordDemos = e.target.checked; save(); if (!settings.recordDemos) recorder.disarm(); else if (cg && cg.localId) recorder.arm(DemoRecorder.headerFrom(cg)); };
 // map / mode selectors (host side; the guest learns both from the WELCOME handshake), bot difficulty for practice
@@ -228,7 +230,7 @@ async function start(mode) {
   settings.name = mode.name || $('name').value.trim() || 'player'; settings.server = $('server').value.trim(); save();
   status('loading...');
   try {
-    audio.init(); audio.resume(); audio.setVolume(settings.vol);
+    audio.init(); audio.resume(); audio.setVolume(settings.vol); audio.announcerEnabled = settings.announcer !== false; audio.loadVoices().catch((err) => console.warn('[audio] voice pack', err));
     let transport, mapName = settings.map || DEFAULT_MAP, gameMode = settings.mode || 'duel';
     const ident = { skin: settings.skin, color: settings.color };
     const hostOpts = () => ({ mode: gameMode, rules: { physics: settings.physics, ...(rulesOverride || {}) }, log: (...m) => console.log('[host]', ...m) });
@@ -293,7 +295,7 @@ async function start(mode) {
     let hostWaiting = mode.kind === 'host' || mode.kind === 'host-room';
     const game = cg = new ClientGame(map, transport, { mode: gameMode, name: settings.name, skin: ident.skin, color: ident.color, interpSnaps: settings.interp, onEvent: onEvent, onKick: (r) => stop('kicked: ' + r),
       // demo recording: armed on WELCOME (map / mode / rules known), every snapshot on arrival, the view per frame in loop()
-      onWelcome: (m) => { if (settings.recordDemos !== false) recorder.arm(DemoRecorder.headerFrom(game, m)); },
+      onWelcome: (m) => { if (settings.recordDemos !== false) recorder.arm(DemoRecorder.headerFrom(game, m)); if (!game.welcomed) { game.welcomed = true; audio.loadVoices().then(() => audio.announce('welcome')).catch(() => {}); } },
       onSnap: (snap) => recorder.snapshot(snap, snap.recvAt),
       onInfo: (info) => {
         // P2P host: stay on the menu (the invite code is there) until the guest has joined, then enter the arena
@@ -331,7 +333,7 @@ async function startDemo(demo) {
   if (running) return;
   status('loading demo...');
   try {
-    audio.init(); audio.resume(); audio.setVolume(settings.vol);
+    audio.init(); audio.resume(); audio.setVolume(settings.vol); audio.announcerEnabled = settings.announcer !== false; audio.loadVoices().catch((err) => console.warn('[audio] voice pack', err));
     const map = await loadArena(demo.map);
     ensureInput();
     running = true;

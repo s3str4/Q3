@@ -69,6 +69,15 @@ html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-f
 #center-msg { position: absolute; top: 33%; width: 100%; text-align: center; font-family: var(--num); font-stretch: condensed; font-size: 60px; font-weight: 700; letter-spacing: 8px; color: #fff; text-shadow: 0 0 14px #000, 0 0 30px var(--accent); opacity: 0; transition: opacity 200ms; }
 #click-to-play { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; background: rgba(0,0,0,0.35); pointer-events: auto; cursor: pointer; font-family: var(--num); font-size: 44px; letter-spacing: 8px; font-weight: 700; color: #fff; text-shadow: 0 0 14px #000, 0 0 30px var(--accent); }
 #click-to-play small { font-size: 14px; letter-spacing: 3px; opacity: 0.8; font-family: inherit; }
+#medal { position: absolute; top: 10%; left: 50%; transform: translate(-50%, 0) scale(0.6); width: 240px; text-align: center; opacity: 0; pointer-events: none; transition: opacity 250ms, transform 250ms; --mc: #ffd23a; }
+#medal.show { opacity: 1; transform: translate(-50%, 0) scale(1); animation: medal-pop 420ms cubic-bezier(.2,1.6,.4,1); }
+@keyframes medal-pop { 0% { transform: translate(-50%, 0) scale(0.3); } 60% { transform: translate(-50%, 0) scale(1.18); } 100% { transform: translate(-50%, 0) scale(1); } }
+#medal .medal-icon { width: 72px; height: 72px; margin: 0 auto; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #fff8, var(--mc) 45%, #0008 100%); box-shadow: 0 0 22px var(--mc), inset 0 0 8px #0009; border: 3px solid #fffb; display: flex; align-items: center; justify-content: center; }
+#medal .medal-icon svg { width: 46px; height: 46px; fill: #fff; filter: drop-shadow(0 0 3px #0009); }
+#medal .medal-text { margin-top: 6px; font-family: var(--num); font-stretch: condensed; font-weight: 700; font-size: 26px; letter-spacing: 4px; color: var(--mc); text-shadow: 0 0 10px #000, 0 0 18px var(--mc); }
+#medal .medal-text small { display: block; font-size: 14px; letter-spacing: 2px; color: #fff; opacity: 0.85; }
+.mini-medal { display: inline-flex; align-items: center; gap: 3px; margin-right: 6px; color: var(--mc); font-weight: 700; }
+.mini-medal svg { width: 14px; height: 14px; fill: var(--mc); filter: drop-shadow(0 0 2px #000); }
 #center-msg .sub { display: block; font-size: 20px; letter-spacing: 3px; opacity: 0.8; margin-top: 4px; }
 #obituary { position: absolute; left: 20px; top: 20px; font-size: 14px; text-shadow: 0 0 4px #000; display: flex; flex-direction: column; gap: 4px; }
 #obituary div { display: flex; align-items: center; gap: 8px; background: rgba(0,0,0,0.5); padding: 3px 10px 3px 8px; border-left: 3px solid var(--c, var(--red)); animation: fadein 150ms ease-out; }

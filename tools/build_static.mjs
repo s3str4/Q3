@@ -52,7 +52,7 @@ const size = (dir) => fs.readdirSync(dir, { withFileTypes: true }).reduce((a, e)
 console.log(`static build written to ${OUT} (${(size(OUT) / 1024 / 1024).toFixed(1)} MB, ${needed.size} three addon files)`);
 
 if (args.serve) {
-  const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css', '.json': 'application/json' };
+  const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css', '.json': 'application/json', '.wav': 'audio/wav' };
   const port = +args.serve;
   http.createServer((req, res) => {
     let url = decodeURIComponent((req.url || '/').split('?')[0]); if (url === '/') url = '/index.html';

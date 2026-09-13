@@ -111,4 +111,11 @@ export const EV = {
   FIRE: 1, HIT: 2, EXPLODE: 3, PICKUP: 4, PAIN: 5, DEATH: 6, RESPAWN: 7, JUMP: 8, LAND: 9, FOOTSTEP: 10,
   ITEM_RESPAWN: 11, RAIL_TRAIL: 12, BULLET_IMPACT: 13, JUMPPAD: 14, TELEPORT: 15, WEAPON_CHANGE: 16, NOAMMO: 17,
   MATCH_START: 18, MATCH_END: 19, ROUND_START: 20, ROUND_END: 21, GIB: 22, LG_HIT: 23, COUNTDOWN: 24, MAJOR_WARN: 25, FALL_DAMAGE: 26, STEP: 27,
+  AWARD: 28, LEAD: 29, FRAGS_LEFT: 30, TIME_WARN: 31,   // announcer: medals (award: AWARDS), lead changes (status: taken/lost/tied), N frags left, N-minute warning
 };
+
+// Announcer medals (Q3 rewards): EXCELLENT two frags within CARNAGE_REWARD_TIME, IMPRESSIVE two consecutive rail hits,
+// HUMILIATION a gauntlet frag, PERFECT an arena round won without taking damage.
+export const AWARDS = { EXCELLENT: 'excellent', IMPRESSIVE: 'impressive', HUMILIATION: 'humiliation', PERFECT: 'perfect' };
+export const CARNAGE_REWARD_TIME = 3000;   // ms, Q3 g_combat.c
+export const TIME_WARNINGS = [5, 1];       // minutes left at which the announcer warns (timelimit modes)

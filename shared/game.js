@@ -2,6 +2,7 @@
 import {
   PM, WEAPONS, WEAPON_DEFS, WEAPON_ORDER, WEAPON_DROP_TIME, WEAPON_RAISE_TIME, SELF_DAMAGE_SCALE, ARMOR_PROTECTION,
   HEALTH, ARMOR, ITEMS, ITEM_HALF, MATCH, BUTTONS, TICK_MS, FRAMETIME, EV, LAG_COMP_MAX_MS, HISTORY_TICKS, PHYSICS, PLAYER_SKINS, PLAYER_COLORS,
+  AWARDS, CARNAGE_REWARD_TIME, TIME_WARNINGS,
 } from './constants.js';
 import { pmove, newPlayerState, PMF } from './pmove.js';
 import { traceBox } from './trace.js';
@@ -50,6 +51,7 @@ export class Game {
       attackHeld: false, history: [], mins: PM.mins, maxs: PM.maxs, origin: [0, 0, 0], isBot: !!opts.isBot, ready: false,
       viewTime: 0, respawnPending: false, lastPain: 0, healthDecayAt: 0, lastFootstep: 0, killer: null, ping: 0, connectedAt: this.time, meansOfDeath: 0,
       shotsBy: {}, hitsBy: {}, lastHitTick: {}, spawnAngles: [0, 0, 0], teleportSeq: 0,
+      lastKillTime: -1e9, railStreak: 0, awards: {}, leadStatus: 'tied', roundDamageStart: 0,   // announcer state (see award / checkLead)
     };
     this.players.set(id, p);
     if (this.match.state !== 'playing' || this.mode === 'duel') this.spawnPlayer(p, true);
@@ -351,7 +353,7 @@ export class Game {
       }
       const end = ma(eye, wd.range, dir);
       const tr = this.traceLagComp(p, eye, end);
-      if (w === WEAPONS.RAIL) this.events.push({ type: EV.RAIL_TRAIL, id: p.id, start: copy(eye), end: copy(tr.endpos) });
+      if (w === WEAPONS.RAIL) { this.railAccuracy(p, !!tr.entity); this.events.push({ type: EV.RAIL_TRAIL, id: p.id, start: copy(eye), end: copy(tr.endpos) }); }
       if (tr.entity) {
         this.damage(this.players.get(tr.entity.id), p, wd.damage, dir, tr.endpos, w, 0);
         if (w === WEAPONS.LIGHTNING) this.events.push({ type: EV.LG_HIT, id: p.id, origin: copy(tr.endpos) });
@@ -504,6 +506,30 @@ export class Game {
     if (target.health <= 0) this.killPlayer(target, attacker, mod, take + asave);
   }
 
+  // ---------- announcer: medals, lead changes, frags left (events only; the client voices and draws them) ----------
+  award(p, award, target = null) {
+    if (this.match.state !== 'playing') return;
+    p.awards[award] = (p.awards[award] || 0) + 1;
+    this.events.push({ type: EV.AWARD, id: p.id, award, target: target ? target.id : 0, count: p.awards[award] });
+  }
+  railAccuracy(p, hit) { // Q3: two consecutive rail hits = IMPRESSIVE; a miss resets the streak
+    if (!hit) { p.railStreak = 0; return; }
+    if (++p.railStreak >= 2) { p.railStreak = 0; this.award(p, AWARDS.IMPRESSIVE); }
+  }
+  checkLead() { // duel: each player is told when they take / lose / tie the lead (Q3 EV_TAKEN_LEAD / LOST_LEAD / TIED_LEAD)
+    if (this.mode !== 'duel' || this.match.state !== 'playing') return;
+    const ps = [...this.players.values()]; if (ps.length < 2) return;
+    for (const p of ps) {
+      const best = Math.max(...ps.filter((q) => q !== p).map((q) => q.frags));
+      const st = p.frags > best ? 'taken' : p.frags < best ? 'lost' : 'tied';
+      if (st !== p.leadStatus) { p.leadStatus = st; this.events.push({ type: EV.LEAD, id: p.id, status: st }); }
+    }
+  }
+  checkFragsLeft(p) { // fraglimit modes: "three / two / one frag(s) left" as the leader closes in, once per value
+    const fl = this.rules.fraglimit; if (!fl || this.match.state !== 'playing') return;
+    const left = fl - p.frags;
+    if (left >= 1 && left <= 3 && (this.match.fragsLeftAnnounced || 4) > left) { this.match.fragsLeftAnnounced = left; this.events.push({ type: EV.FRAGS_LEFT, id: p.id, left }); }
+  }
   killPlayer(target, attacker, mod, lastDamage = 0) {
     if (target.dead) return;
     target.dead = true; target.deathTime = this.time; target.deaths++;
@@ -513,6 +539,12 @@ export class Game {
     if (attacker && attacker !== target) attacker.frags++; else target.frags--; // suicide/world = -1 like Q3
     const gib = target.health <= -40; // Q3 GIB_HEALTH -40
     this.events.push({ type: EV.DEATH, id: target.id, attacker: attacker ? attacker.id : 0, mod, origin: copy(target.ps.origin), gib, frags: { [target.id]: target.frags, ...(attacker ? { [attacker.id]: attacker.frags } : {}) } });
+    if (attacker && attacker !== target) { // Q3 g_combat.c rewards: gauntlet frag, two frags within CARNAGE_REWARD_TIME
+      if (mod === WEAPONS.GAUNTLET) this.award(attacker, AWARDS.HUMILIATION, target);
+      if (this.time - attacker.lastKillTime < CARNAGE_REWARD_TIME) this.award(attacker, AWARDS.EXCELLENT, target);
+      attacker.lastKillTime = this.time;
+    }
+    this.checkLead(); if (attacker && attacker !== target) this.checkFragsLeft(attacker);
     if (this.mode === 'arena') this.onArenaKill(target, attacker);
     if (this.mode === 'duel' && this.match.state === 'playing' && this.match.overtime) this.endMatch(attacker && attacker !== target ? attacker : this.other(target));
     if (this.mode === 'duel' && this.match.state === 'playing' && this.rules.fraglimit && attacker && attacker.frags >= this.rules.fraglimit) this.endMatch(attacker);
@@ -554,6 +586,7 @@ export class Game {
       } else if (m.state === 'playing') {
         if (n < 2) { /* opponent left: keep playing as practice; match ends when time runs out */ }
         const elapsed = this.time - m.startTime;
+        if (this.rules.timelimit && !m.overtime) for (const min of TIME_WARNINGS) { const at = this.rules.timelimit - min * 60000; if (at > 0 && elapsed >= at && elapsed < this.rules.timelimit && !m.timeWarned[min]) { m.timeWarned[min] = true; this.events.push({ type: EV.TIME_WARN, minutes: min }); } }
         if (!m.overtime && this.rules.timelimit && elapsed >= this.rules.timelimit) {
           const ps = [...this.players.values()];
           if (ps.length >= 2 && ps[0].frags === ps[1].frags) { m.overtime = true; this.events.push({ type: EV.MAJOR_WARN, text: 'OVERTIME: sudden death' }); }
@@ -596,7 +629,7 @@ export class Game {
   }
   startMatch() {
     const m = this.match;
-    m.state = 'playing'; m.startTime = this.time; m.overtime = false; m.winner = null;
+    m.state = 'playing'; m.startTime = this.time; m.overtime = false; m.winner = null; m.fragsLeftAnnounced = 0; m.timeWarned = {};
     for (const it of this.items) { it.available = true; it.respawnAt = 0; }
     for (const p of this.players.values()) { resetStats(p); this.spawnPlayer(p, true); }
     this.events.push({ type: EV.MATCH_START });
@@ -608,7 +641,7 @@ export class Game {
     for (const p of this.players.values()) {
       const byWeapon = {};
       for (const w of new Set([...Object.keys(p.shotsBy), ...Object.keys(p.hitsBy)])) byWeapon[w] = { shots: p.shotsBy[w] || 0, hits: p.hitsBy[w] || 0 };
-      scores[p.id] = { name: p.name, bot: !!p.isBot, frags: p.frags, deaths: p.deaths, dmg: p.damageDealt, dmgTaken: p.damageTaken, shots: p.shots, hits: p.hits, acc: p.shots ? p.hits / p.shots : 0, byWeapon, rounds: m.roundWins[p.id] || 0 };
+      scores[p.id] = { name: p.name, bot: !!p.isBot, frags: p.frags, deaths: p.deaths, dmg: p.damageDealt, dmgTaken: p.damageTaken, shots: p.shots, hits: p.hits, acc: p.shots ? p.hits / p.shots : 0, byWeapon, rounds: m.roundWins[p.id] || 0, awards: { ...p.awards } };
     }
     return { winner: m.winner, scores, duration: Math.max(0, m.endTime - m.startTime), mode: this.mode, map: this.map.name, rounds: this.mode === 'arena' ? m.round : 0, overtime: !!m.overtime, intermission: this.rules.intermission };
   }
@@ -638,7 +671,7 @@ export class Game {
   startRound() {
     const m = this.match;
     m.round++; m.roundState = 'live'; m.roundStart = this.time;
-    for (const p of this.players.values()) if (p.dead) this.spawnPlayer(p, true); // (already fresh from the countdown)
+    for (const p of this.players.values()) { p.roundDamageStart = p.damageTaken; if (p.dead) this.spawnPlayer(p, true); } // (already fresh from the countdown)
     this.events.push({ type: EV.ROUND_START, round: m.round, wins: { ...m.roundWins } });
   }
   onArenaKill(target, attacker) {
@@ -651,6 +684,7 @@ export class Game {
     m.roundState = 'over';
     if (winner) m.roundWins[winner.id] = (m.roundWins[winner.id] || 0) + 1;
     this.events.push({ type: EV.ROUND_END, round: m.round, winner: winner ? winner.id : null, wins: { ...m.roundWins } });
+    if (winner && winner.damageTaken === winner.roundDamageStart) this.award(winner, AWARDS.PERFECT);
     if (winner && m.roundWins[winner.id] >= Math.max(1, Math.floor(this.rules.rounds / 2) + 1)) { this.endMatch(winner); return; } // first to a majority (6 of 10)
     // all rounds played (draws do not count for anyone): the leader wins; a tie goes to sudden death (more rounds)
     if (m.round >= this.rules.rounds) {
@@ -705,11 +739,12 @@ export class Game {
 }
 
 export function newMatchState(mode) {
-  return { state: mode === 'arena' ? 'waiting' : 'warmup', startTime: 0, endTime: 0, winner: null, overtime: false, round: 0, roundState: 'idle', roundEndAt: 0, roundWins: {}, countdownAt: 0, lastCountdown: 0, hold: false };
+  return { state: mode === 'arena' ? 'waiting' : 'warmup', startTime: 0, endTime: 0, winner: null, overtime: false, round: 0, roundState: 'idle', roundEndAt: 0, roundWins: {}, countdownAt: 0, lastCountdown: 0, hold: false, fragsLeftAnnounced: 0, timeWarned: {} };
 }
 // Every per-match statistic a player carries (the end screen reads them from the MATCH_END event).
 export function resetStats(p) {
   p.frags = 0; p.deaths = 0; p.damageDealt = 0; p.damageTaken = 0; p.hits = 0; p.shots = 0; p.shotsBy = {}; p.hitsBy = {}; p.lastHitTick = {};
+  p.lastKillTime = -1e9; p.railStreak = 0; p.awards = {}; p.leadStatus = 'tied'; p.roundDamageStart = 0;
 }
 export function boxesOverlap(o1, mn1, mx1, o2, mn2, mx2) {
   for (let i = 0; i < 3; i++) if (o1[i] + mx1[i] < o2[i] + mn2[i] || o1[i] + mn1[i] > o2[i] + mx2[i]) return false;
