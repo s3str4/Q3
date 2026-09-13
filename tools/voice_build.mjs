@@ -17,8 +17,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, 'client', 'audio', 'voice');
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, all) => a.startsWith('--') ? [a.slice(2), all[i + 1] && !all[i + 1].startsWith('--') ? all[i + 1] : true] : []).filter(Boolean));
 const RAW = path.resolve(args.raw || path.join(os.tmpdir(), 'arena_voice_raw'));
-const PITCH = +(args.pitch || 0.62);       // resample factor: 0.62 = about -8.3 semitones (formants follow: a much bigger chest), 1.6x slower before the rate compensation
-const RATE = args.rate || 'x-fast';        // SSML prosody rate before the slow-down (x-fast * 0.62 = a deliberate, not sluggish, delivery)
+const PITCH = +(args.pitch || 0.68);       // resample factor: 0.68 = about -6.7 semitones (formants follow: a bigger chest); deeper than this smears the consonants
+const RATE = args.rate || 'fast';          // SSML prosody rate before the slow-down; 'fast' keeps the articulation clean ('x-fast' slurs Zira)
 const VOICE = args.voice || 'Microsoft Zira Desktop';
 const SR = 22050;
 
@@ -124,10 +124,10 @@ function processClip(name) {
   let x = trim(samples, rate);
   x = resample(x, PITCH);
   x = onePole(x, rate, 60, true);           // rumble off, keep the chest
-  { const low = onePole(x, rate, 260); for (let i = 0; i < x.length; i++) x[i] += low[i] * 1.2; } // +7 dB low shelf below 260 Hz (the Q3 announcer's weight)
-  x = saturate(normalize(x, 0.8), 2.4);     // grit, evenly for every line
-  x = reverb(x, rate);
-  x = onePole(x, rate, 4200);               // vintage 22 kHz feel, less sibilance
+  { const low = onePole(x, rate, 260); for (let i = 0; i < x.length; i++) x[i] += low[i] * 0.9; } // +5.6 dB low shelf below 260 Hz (the Q3 announcer's weight)
+  x = saturate(normalize(x, 0.8), 1.7);     // a little grit, evenly for every line (more eats the consonants)
+  x = reverb(x, rate, { wet: 0.22 });
+  x = onePole(x, rate, 6500);               // vintage 22 kHz feel, consonants kept
   x = fadeOut(normalize(x, 0.89), rate);
   if (rate !== SR) x = resample(x, rate / SR);
   writeWav(path.join(OUT, `${name}.wav`), x, SR);
