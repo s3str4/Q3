@@ -5,6 +5,9 @@ import { TICK_MS, TICK_RATE, EV, PM } from '../../shared/constants.js';
 import { copy, lerp, lerpAngle, dist } from '../../shared/vec3.js';
 import { PMF } from '../../shared/pmove.js';
 
+const STEP_TIME = 200; // ms, Q3 cg_view.c STEP_TIME
+const MAX_STEP_CHANGE = 32; // Q3 MAX_STEP_CHANGE
+
 export class ClientGame {
   constructor(map, transport, opts = {}) {
     this.map = map;
@@ -113,6 +116,7 @@ export class ClientGame {
     this.pending = this.pending.filter((c) => c.seq > me.ack);
     this.stats.acked = me.ack;
     for (const c of this.pending) this.game.runPlayerCommand(p, c, true);
+    p.ps.stepTime = 0; // replays re-climb the same stairs; only the fresh command (runCommand) may feed step smoothing
     // A respawn or teleport moves the player by design (the server picks the spot); it is not a misprediction.
     const reset = p.spawnTime !== prevSpawn || (p.teleportSeq || 0) !== prevTele || wasDead;
     if (predictedBefore && !p.dead && !reset) {
@@ -155,6 +159,13 @@ export class ClientGame {
     // vt: the server time whose remote positions we are showing right now (see renderTime); the server rewinds hitscan to it
     const cmd = { seq: this.seq, forward: input.forward, right: input.right, up: input.up, buttons: input.buttons, angles: [input.pitch, input.yaw, 0], weapon: input.weapon, vt: Math.round(this.renderTime()) };
     const events = this.game.runPlayerCommand(p, cmd, true);
+    if (p.ps.stepTime) {
+      const now = performance.now();
+      const t = this.stepAt ? (now - this.stepAt) / STEP_TIME : 1;
+      const oldStep = t < 1 ? this.stepSmooth * (1 - t) : 0;
+      this.stepSmooth = Math.max(-MAX_STEP_CHANGE, Math.min(MAX_STEP_CHANGE, oldStep + p.ps.stepTime));
+      this.stepAt = now; p.ps.stepTime = 0;
+    }
     for (const e of events) { if (e.type === EV.FIRE) this.pendingLocalEvents.push({ seq: e.seq, t: performance.now() }); this.onEvent(e, true); }
     this.pendingLocalEvents = this.pendingLocalEvents.filter((x) => performance.now() - x.t < 2000);
     this.pending.push(cmd);
@@ -217,9 +228,8 @@ export class ClientGame {
       if (t >= 1) this.errorOffset = null;
       else { const k = 1 - t; o[0] += this.errorOffset[0] * k; o[1] += this.errorOffset[1] * k; o[2] += this.errorOffset[2] * k; }
     }
-    // Q3 step smoothing: when the origin jumps up a step, the view eases up over 100 ms
-    if (p.ps.stepTime) { this.stepSmooth += p.ps.stepTime; p.ps.stepTime = 0; this.stepAt = now; }
-    if (this.stepSmooth) { const t = (now - this.stepAt) / 120; if (t >= 1) this.stepSmooth = 0; else o[2] -= this.stepSmooth * (1 - t); }
+    // Q3 step smoothing (CG_StepOffset): the view lags the origin by the remaining step offset over STEP_TIME
+    if (this.stepSmooth) { const t = (now - this.stepAt) / STEP_TIME; if (t >= 1) this.stepSmooth = 0; else o[2] -= this.stepSmooth * (1 - t); }
     return { origin: o, viewHeight: p.ps.viewHeight, angles: p.ps.viewangles, velocity: p.ps.velocity, ducked: (p.ps.pmFlags & PMF.DUCKED) !== 0, ground: p.ps.groundEntity, dead: p.dead, player: p };
   }
 }
