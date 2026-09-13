@@ -297,7 +297,7 @@ export class PlayerModel {
     _t.copy(this.gripL); _t.z += Math.sin(now * 0.0019 + 0.4) * idle; _t.x += Math.sin(now * 0.0013) * idle; solveArm(this.armL, this.armL.userData.elbow, _t, HINT_L);
     // gauntlet: the saw spins while the trigger is held
     const wm = this.weaponMeshes[this.weaponId];
-    if (wm && wm.userData.blade) { this.bladeSpin += ((r.ah ? 40 : 0) - this.bladeSpin) * Math.min(1, dt * (r.ah ? 6 : 1.5)); this.bladeAngle += this.bladeSpin * dt; wm.userData.blade.rotation.y = this.bladeAngle; }
+    if (wm && wm.userData.blade) { this.bladeSpin += ((r.ah ? 16 : 0) - this.bladeSpin) * Math.min(1, dt * (r.ah ? 6 : 1.5)); this.bladeAngle += this.bladeSpin * dt; wm.userData.blade.rotation.y = this.bladeAngle; }
   }
   // Death: a 480 ms fall (back / forward / side) into a corpse pose, then the body sinks away after 1.6 s.
   deathPose(origin, yaw, now) {

@@ -157,7 +157,7 @@ export function makeWeaponMesh(w, scale = 1, opts = {}) {
       // well as from the side; it sticks out past the fist
       const blade = new THREE.Group(); blade.position.set(15, 0, 0.5);
       const disc = new THREE.Mesh(cyl(6.5, 6.5, 1.4, 16), steel()); blade.add(disc);
-      for (let i = 0; i < 8; i++) { const a = i * Math.PI / 4; const tooth = new THREE.Mesh(box(2.6, 2.2, 1.4), steel()); tooth.position.set(Math.cos(a) * 6.8, Math.sin(a) * 6.8, 0); tooth.rotation.z = a + 0.4; blade.add(tooth); }
+      for (let i = 0; i < 8; i++) { const a = i * Math.PI / 4; const tooth = new THREE.Mesh(box(2.6, 2.2, 1.4), i === 0 ? accent(c) : steel()); /* one marked tooth so the spin reads */ tooth.position.set(Math.cos(a) * 6.8, Math.sin(a) * 6.8, 0); tooth.rotation.z = a + 0.4; blade.add(tooth); }
       const hub = new THREE.Mesh(cyl(2.4, 2.4, 1.8, 10), coreMat); blade.add(hub);
       anim = { blade };
       muzzle = [20, 0, 0]; break;

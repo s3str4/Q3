@@ -158,7 +158,7 @@ export class ViewModel {
     holder.rotation.set(this.recoil * 0.12 + this.climb * 0.1 + this.slide * 0.05 - drop * 0.9 + this.sway[1] * 0.02, 0.07 + this.sway[0] * 0.03 + this.recoil * 0.03, this.sway[0] * 0.02 - this.recoil * 0.04);
     // --- per-weapon live parts ---
     if (model.userData.blade) { // gauntlet: the blade spins up while the trigger is held, freewheels down after
-      const want = p.attackHeld ? 40 : 0;
+      const want = p.attackHeld ? 16 : 0; // 16 rad/s: 2.5 turns a second reads as a spin at 60 fps (40 strobed against the 8 teeth)
       this.bladeSpin += (want - this.bladeSpin) * Math.min(1, dt * (p.attackHeld ? 6 : 1.5));
       this.bladeAngle += this.bladeSpin * dt; model.userData.blade.rotation.y = this.bladeAngle;
     }
@@ -175,7 +175,7 @@ export class ViewModel {
         live.coil.emissiveIntensity = 0.6 + this.railCharge * 2.6;
         live.core.color.setHex(0x5cff9d).multiplyScalar(0.8 + this.railCharge * 2);
       } else if (w === WEAPONS.PLASMA) { live.core.color.setHex(0xe8d0ff).multiplyScalar(0.9 + 0.2 * Math.sin(now * 0.02) + (firing ? 0.8 : 0)); live.coil.emissiveIntensity = 0.6 + (firing ? 0.8 : 0); }
-      else if (w === WEAPONS.GAUNTLET) { live.core.color.setHex(0xff9a5c).multiplyScalar(0.8 + this.bladeSpin / 40 * 1.2); }
+      else if (w === WEAPONS.GAUNTLET) { live.core.color.setHex(0xff9a5c).multiplyScalar(0.8 + this.bladeSpin / 16 * 1.2); }
     }
     // muzzle point follows the active weapon
     const mz = holder.userData.muzzle;

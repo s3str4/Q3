@@ -48,7 +48,7 @@ export class Game {
       skin: PLAYER_SKINS.includes(opts.skin) ? opts.skin : null, color: Number.isInteger(opts.color) && PLAYER_COLORS[opts.color] ? opts.color : null,
       weapon: WEAPONS.MACHINEGUN, pendingWeapon: 0, weaponState: 'ready', weaponTime: 0, ammo: {}, weapons: 0,
       frags: 0, deaths: 0, damageDealt: 0, damageTaken: 0, hits: 0, shots: 0, lastCmdSeq: 0, cmdQueue: [], lastCmd: null, idleTicks: 0,
-      attackHeld: false, history: [], mins: PM.mins, maxs: PM.maxs, origin: [0, 0, 0], isBot: !!opts.isBot, ready: false,
+      attackHeld: false, fireLatch: false, history: [], mins: PM.mins, maxs: PM.maxs, origin: [0, 0, 0], isBot: !!opts.isBot, ready: false,
       viewTime: 0, respawnPending: false, lastPain: 0, healthDecayAt: 0, lastFootstep: 0, killer: null, ping: 0, connectedAt: this.time, meansOfDeath: 0,
       shotsBy: {}, hitsBy: {}, lastHitTick: {}, spawnAngles: [0, 0, 0], teleportSeq: 0,
       lastKillTime: -1e9, railStreak: 0, awards: {}, leadStatus: 'tied', roundDamageStart: 0,   // announcer state (see award / checkLead)
@@ -86,7 +86,7 @@ export class Game {
       p.ammo = { [WEAPONS.GAUNTLET]: -1, [WEAPONS.MACHINEGUN]: WEAPON_DEFS[WEAPONS.MACHINEGUN].ammoStart };
       p.weapon = WEAPONS.MACHINEGUN;
     }
-    p.pendingWeapon = 0; p.weaponState = 'ready'; p.weaponTime = 0; p.attackHeld = true; // require release before firing
+    p.pendingWeapon = 0; p.weaponState = 'ready'; p.weaponTime = 0; p.fireLatch = true; // require release before firing
     p.healthDecayAt = this.time + HEALTH.decayInterval;
     p.history = [];
     // telefrag anyone standing there
@@ -272,6 +272,7 @@ export class Game {
 
   // ---------- weapons ----------
   weaponLogic(p, cmd, events, predict) {
+    p.attackHeld = (cmd.buttons & BUTTONS.ATTACK) !== 0; // trigger state for the renderers (gauntlet spin, snapshot ah); fireLatch below is the spawn release latch
     // exact 1/60 s accounting (a rounded 17 ms would make the rail refire in 89 ticks = 1483 ms instead of 1500)
     if (p.weaponTime > 0) { p.weaponTime -= TICK_MS; if (p.weaponTime < 1e-6) p.weaponTime = 0; }
     // weapon selection
@@ -289,8 +290,8 @@ export class Game {
     }
     if (p.weaponTime > 0) return;
     const attack = (cmd.buttons & BUTTONS.ATTACK) !== 0;
-    if (!attack) { p.attackHeld = false; return; }
-    if (p.attackHeld && WEAPON_DEFS[p.weapon].melee) return; // gauntlet: fire held through a respawn must be released first
+    if (!attack) { p.fireLatch = false; return; }
+    if (p.fireLatch && WEAPON_DEFS[p.weapon].melee) return; // gauntlet: fire held through a respawn must be released first
     if (this.match.state === 'countdown' || this.match.state === 'ended') return;
     const wd = WEAPON_DEFS[p.weapon];
     const ammo = p.ammo[p.weapon] ?? 0;
