@@ -11,22 +11,46 @@
 // Lifecycle: each cue is a "voice" (gain + optional panner + N scheduled sources). A voice knows the time its last source
 // stops; update() garbage-collects finished voices (and onended does the same eagerly), so no node outlives its sound.
 // Loops (lightning beam, rocket flight) are voices flagged loop=true and are stopped explicitly.
-import { EV, WEAPONS, ITEMS } from '../../shared/constants.js';
+import { EV, WEAPONS, ITEMS, PM } from '../../shared/constants.js';
 import { angleVectors } from '../../shared/vec3.js';
+import { traceBox } from '../../shared/trace.js';
+import { BRUSH_FLAGS } from '../../shared/map.js';
 
 export const REF_DIST = 320, MAX_DIST = 3000, ROLLOFF = 1;
 export const SPEED_OF_SOUND = 3000;          // ups, for the rocket flight doppler (rocket = 900 ups -> +-0.3 octave)
-export const REMOTE_GAIN = 1.35;             // spatial voices: compensates the HRTF frontal loss so enemy cues are >= own cues at equal distance
+export const REMOTE_GAIN = 1.43;             // spatial voices: margin over the compensated HRTF so enemy cues are >= own cues at equal distance, in every direction
 // Direction-aware EQ on spatial voices flattening Chrome's HRTF (measured per direction with `node tools/audio_measure.mjs --hrtf`,
 // table in docs/AUDIO.md). Relative to a direct connection the HRTF is +3 dB below 300 Hz and -5 dB around 1 kHz from the
 // front; from behind / above / below it loses a further 4-6 dB in the 2-5 kHz band that carries the locating cues (footstep
-// tap, MG crack), while the near ear from the side is flat. Each spatial voice runs low shelf -> 1 kHz peak -> 3.3 kHz peak
-// with gains blended from the five hemisphere entries by the source direction in the listener's frame (see dirComp()).
-// Entries: [low shelf dB @250 Hz, peak dB @1 kHz, peak dB @3.3 kHz, broadband dB].
+// tap, MG crack), with notches at 700 Hz and 2 kHz from above and at 6 kHz from below, while the near ear from the side is
+// flat. Each spatial voice runs the `bands` cascade (low shelf + five peaking filters, [type, Hz, Q]) whose gains, plus a
+// broadband gain, are blended from the five hemisphere entries by the source direction in the listener's frame (dirComp()).
+// The entries are the least-squares fit of the cascade to the inverse of the binaural power mean of the measured L / R
+// response, 125-6000 Hz (tools/scratch/fit_comp.mjs on .evidence/audio/hrtf.json; residual 0.4-0.6 dB rms behind / side /
+// above, 1.4-1.5 in front / below where the response is jagged), so a cue keeps one loudness and one timbre whichever way it
+// comes from: measured binaural dB(A) within +-2 of the front for every dual cue in six directions (rule 16 of the tool).
+// Entries: [gain dB per band..., broadband dB].
 export const HRTF_COMP = {
-  shelfFreq: 250, peakFreq: 1000, peakQ: 0.8, hfFreq: 3300, hfQ: 0.55,
-  front: [-3, 4, 0, 0], back: [-0.5, 1.5, 7.5, 0], side: [-3, 0, 0.5, 0], above: [-2.5, 4, 5.5, 0], below: [-2, 0.5, 6.5, 0],
+  bands: [['lowshelf', 250, 0.7], ['peaking', 700, 1.5], ['peaking', 1200, 1.0], ['peaking', 2200, 1.5], ['peaking', 3500, 1.0], ['peaking', 5500, 1.5]],
+  front: [-4.94, -0.5, 6, -1.69, 0.25, 3.88, 0],
+  back: [-1.56, -0.31, 2.06, 1.31, 2.63, 8.38, 0],
+  side: [-1.81, -1.75, 2.94, 2.44, 4.25, 0.44, -1.56],
+  above: [-2.5, 6.44, 2.13, 4.06, 3, 5.19, -1.19],
+  below: [-8.38, -3.13, -2.81, 0.81, -3.38, 9, 4.94],
 };
+// Footstep / landing surface families by brush material (keys of client/render/materials.js DEFS). FOOTSTEP and LAND events
+// carry no surface: surfaceAt() traces straight down from the player's origin against cg.game.world at cue time and reads the
+// hit brush's `mat`. plate = steel plates (clank), grate = metal grating (ring), stone = stone / concrete (thud), trim = trims,
+// pads and light panels (soft). Unknown or no floor within reach -> plate.
+export const SURFACE_OF = {
+  floor: 'plate', metal: 'plate', wall2: 'plate', tech: 'plate', ceiling: 'plate',
+  floor2: 'grate', grate: 'grate',
+  concrete: 'stone', stone: 'stone', wall: 'stone',
+  trim: 'trim', trim_warm: 'trim', trim_cool: 'trim', trim_red: 'trim', trim_green: 'trim', jumppad: 'trim', teleporter: 'trim',
+  glow_warm: 'trim', glow_cool: 'trim', glow_red: 'trim', glow_green: 'trim',
+};
+export const SURFACES = ['plate', 'grate', 'stone', 'trim'];
+const SURFACE_REACH = 48;                    // how far below the feet the floor may be and still name the step (a landing traces from the frame it touched down)
 export const CEILING = 0.95;                 // soft-clip ceiling after the limiter (Chrome's compressor alone lets summed peaks exceed 0 dBFS)
 export const MAX_VOICES = 48;                // oldest one-shot voice is dropped beyond this
 // Damage events are voiced per tick, not per event: shared/game.js emits one EV.HIT / EV.PAIN per shotgun pellet (and per
@@ -46,11 +70,13 @@ export const LIMITER = { threshold: -3, knee: 0, ratio: 20, attack: 0.001, relea
 // Per-cue linear gain trims (calibrated so every weapon fire peaks at -6.5 dBFS +-3 post-limiter at the listener, <= -6 dBFS
 // pre-limiter for own and point-blank enemy variants; see docs/AUDIO.md).
 export const CUE_TRIM = {
-  machinegunFire: 0.257, shotgunFire: 0.247, rocketFire: 0.253, lightningLoop: 0.274, railFire: 0.164, plasmaFire: 0.466, gauntletFire: 0.322,
-  rocketLoop: 0.127, rocketExplode: 0.251, plasmaExplode: 0.176, bulletImpact: 0.116, railImpact: 0.132, gauntletImpact: 0.165, lgHit: 0.273,
-  jump: 0.402, landSoft: 0.106, landHard: 0.208, footstep: 0.215, painLight: 0.596, painMid: 0.594, painHeavy: 0.621, painCritical: 0.679, death: 0.618, gib: 0.271,
-  pickupHealth: 0.197, pickupMega: 0.254, pickupArmor: 0.176, pickupWeapon: 0.357, pickupAmmo: 0.284, respawnMajor: 0.27, respawnMinor: 0.084,
-  jumppad: 0.274, teleport: 0.347,
+  machinegunFire: 0.254, shotgunFire: 0.258, rocketFire: 0.26, lightningLoop: 0.215, railFire: 0.155, plasmaFire: 0.475, gauntletFire: 0.265,
+  rocketLoop: 0.147, rocketExplode: 0.263, plasmaExplode: 0.186, bulletImpact: 0.114, railImpact: 0.132, gauntletImpact: 0.15, lgHit: 0.252,
+  jump: 0.406, landSoft: 0.105, landHard: 0.192, footstep: 0.187,
+  footstepGrate: 0.163, footstepStone: 0.211, footstepTrim: 0.281, landSoftGrate: 0.096, landHardGrate: 0.17, landSoftStone: 0.116, landHardStone: 0.211, landSoftTrim: 0.117, landHardTrim: 0.226,
+  painLight: 0.592, painMid: 0.6, painHeavy: 0.648, painCritical: 0.69, death: 0.633, gib: 0.294,
+  pickupHealth: 0.197, pickupMega: 0.242, pickupArmor: 0.171, pickupWeapon: 0.384, pickupAmmo: 0.263, respawnMajor: 0.305, respawnMinor: 0.091,
+  jumppad: 0.297, teleport: 0.357,
   hitTone: 0.295, weaponChange: 0.213, noAmmo: 0.236, countdown: 0.258, fight: 0.22, win: 0.327, lose: 0.531, alert: 0.521,
   ambient: 0.024,
 };
@@ -148,10 +174,9 @@ export class AudioEngine {
     const v = { in: g, panner: null, end: 0, pending: 0, loop: !!o.loop, dead: false, born: ctx.currentTime, bus, baseGain: g.gain.value };
     if (spatial) {
       const p = ctx.createPanner(); p.panningModel = 'HRTF'; p.distanceModel = 'inverse'; p.refDistance = o.ref ?? REF_DIST; p.maxDistance = o.maxDist ?? MAX_DIST; p.rolloffFactor = o.rolloff ?? ROLLOFF;
-      const shelf = ctx.createBiquadFilter(); shelf.type = 'lowshelf'; shelf.frequency.value = HRTF_COMP.shelfFreq;
-      const eq = ctx.createBiquadFilter(); eq.type = 'peaking'; eq.frequency.value = HRTF_COMP.peakFreq; eq.Q.value = HRTF_COMP.peakQ;
-      const hf = ctx.createBiquadFilter(); hf.type = 'peaking'; hf.frequency.value = HRTF_COMP.hfFreq; hf.Q.value = HRTF_COMP.hfQ;
-      g.connect(shelf); shelf.connect(eq); eq.connect(hf); hf.connect(p); p.connect(this.bus[bus]); v.panner = p; v.eq = eq; v.shelf = shelf; v.hf = hf;
+      // compensation cascade (gains set by place()); a Web Audio shelf ignores Q (fixed slope S = 1, i.e. RBJ Q 0.707, what the fit used)
+      const eq = HRTF_COMP.bands.map(([type, f, q]) => { const b = ctx.createBiquadFilter(); b.type = type; b.frequency.value = f; b.Q.value = q; return b; });
+      let prev = g; for (const b of eq) { prev.connect(b); prev = b; } prev.connect(p); p.connect(this.bus[bus]); v.panner = p; v.eq = eq;
       this.place(v, origin, false); this.counters.spatial++;
     } else g.connect(this.bus[bus]);
     this.voices.add(v); this.counters.created++;
@@ -160,7 +185,7 @@ export class AudioEngine {
   }
   // HRTF compensation for a source at `origin`: blend of the HRTF_COMP hemisphere entries weighted by the direction's
   // components in the listener's frame (front/back by the forward component, side by |right|, above/below by the up
-  // component), normalized so an axis-aligned source gets exactly its entry. Returns [shelf dB, 1 kHz dB, 3.3 kHz dB, broadband dB].
+  // component), normalized so an axis-aligned source gets exactly its entry. Returns [gain dB per band..., broadband dB].
   dirComp(origin) {
     const C = HRTF_COMP, L = this.listenerPos, A = this.listenerAxes;
     const dx = origin[0] - L[0], dy = origin[1] - L[1], dz = origin[2] - L[2]; const d = Math.hypot(dx, dy, dz);
@@ -168,22 +193,23 @@ export class AudioEngine {
     const f = (dx * A.forward[0] + dy * A.forward[1] + dz * A.forward[2]) / d, r = Math.abs(dx * A.right[0] + dy * A.right[1] + dz * A.right[2]) / d, u = (dx * A.up[0] + dy * A.up[1] + dz * A.up[2]) / d;
     const w = [[C.front, Math.max(0, f)], [C.back, Math.max(0, -f)], [C.side, r], [C.above, Math.max(0, u)], [C.below, Math.max(0, -u)]];
     const sum = w.reduce((s, [, k]) => s + k, 0) || 1;
-    return [0, 1, 2, 3].map((i) => w.reduce((s, [e, k]) => s + e[i] * k, 0) / sum);
+    return C.front.map((_, i) => w.reduce((s, [e, k]) => s + e[i] * k, 0) / sum);
   }
-  // Move a spatial voice: panner position plus the direction-dependent compensation (smooth = loops that follow a moving source).
+  // Move a spatial voice: panner position plus the direction-dependent compensation (smooth = loops that follow a moving
+  // source; one-shots are set once, at creation). Every frame for loops, so a rocket passing overhead keeps its loudness.
   place(v, origin, smooth = true) {
     const p = v.panner, t = this.ctx.currentTime;
     if (p.positionX) {
       if (smooth) { p.positionX.setTargetAtTime(origin[0], t, 0.02); p.positionY.setTargetAtTime(origin[1], t, 0.02); p.positionZ.setTargetAtTime(origin[2], t, 0.02); }
       else { p.positionX.setValueAtTime(origin[0], t); p.positionY.setValueAtTime(origin[1], t); p.positionZ.setValueAtTime(origin[2], t); }
     } else p.setPosition(origin[0], origin[1], origin[2]);
-    const [shelf, peak, hf, bb] = this.dirComp(origin); const gain = v.baseGain * Math.pow(10, bb / 20);
-    if (smooth) { v.shelf.gain.setTargetAtTime(shelf, t, 0.02); v.eq.gain.setTargetAtTime(peak, t, 0.02); v.hf.gain.setTargetAtTime(hf, t, 0.02); v.in.gain.setTargetAtTime(gain, t, 0.02); }
-    else { v.shelf.gain.value = shelf; v.eq.gain.value = peak; v.hf.gain.value = hf; v.in.gain.value = gain; }
+    const comp = this.dirComp(origin); const gain = v.baseGain * Math.pow(10, comp[comp.length - 1] / 20);
+    if (smooth) { v.eq.forEach((b, i) => b.gain.setTargetAtTime(comp[i], t, 0.02)); v.in.gain.setTargetAtTime(gain, t, 0.02); }
+    else { v.eq.forEach((b, i) => { b.gain.value = comp[i]; }); v.in.gain.value = gain; }
   }
   kill(v) {
     if (v.dead) return; v.dead = true;
-    try { v.in.disconnect(); if (v.shelf) v.shelf.disconnect(); if (v.eq) v.eq.disconnect(); if (v.hf) v.hf.disconnect(); if (v.panner) v.panner.disconnect(); } catch {}
+    try { v.in.disconnect(); for (const b of v.eq || []) b.disconnect(); if (v.panner) v.panner.disconnect(); } catch {}
     this.voices.delete(v); this.counters.killed++;
   }
   // Register a scheduled source on a voice: the voice dies when its last source ends (onended) or, failing that, when update() sees v.end passed.
@@ -427,22 +453,73 @@ export class AudioEngine {
     this.noise(v, t, t + 0.05, { type: 'bandpass', freq: 1100, q: 1, peak: 0.25, attack: 0.002 });
     return v;
   }
-  land(origin, local, hard) {
-    const v = this.voice(this.bodyBus(local), origin, { local, gain: hard ? T.landHard : T.landSoft }); const t = this.now(); const d = this.drive(v, 2);
+  // Landing: the body thud (the player's mass, the same on every floor) under a surface layer: plate clank partials, grating
+  // ring + rattle, stone grit + debris, or a muffled slap on trims / pads. `surface` is one of SURFACES (see surfaceAt()).
+  land(origin, local, hard, surface = 'plate') {
+    const key = (hard ? 'landHard' : 'landSoft') + (surface === 'plate' ? '' : surface[0].toUpperCase() + surface.slice(1));
+    const v = this.voice(this.bodyBus(local), origin, { local, gain: T[key] ?? (hard ? T.landHard : T.landSoft) }); const t = this.now(); const d = this.drive(v, 2);
     this.noise(v, t, t + (hard ? 0.16 : 0.07), { type: 'lowpass', freq: hard ? 700 : 900, freqEnd: 90, peak: 1, attack: 0.002, dest: d });
     this.osc(v, 'sine', hard ? 85 : 120, t, t + (hard ? 0.14 : 0.08), { f1: 45, peak: 0.8, attack: 0.002, dest: d });
+    const s = hard ? 1 : 0.6, k = hard ? 1.4 : 1;
+    if (surface === 'grate') {
+      for (const [f, a, dur] of [[1350, 0.4, 0.14], [2700, 0.28, 0.1], [4100, 0.12, 0.07]]) this.osc(v, 'sine', f, t, t + dur * k, { peak: a * s, attack: 0.001, detune: 5 });
+      this.crackle(v, t, t + (hard ? 0.12 : 0.06), hard ? 5 : 3, { freq: 3000, peak: 0.35 * s, min: 0.006, max: 0.012 });   // the bars rattle
+    } else if (surface === 'stone') {
+      this.noise(v, t, t + (hard ? 0.09 : 0.05), { type: 'bandpass', freq: 1300, q: 0.7, peak: 0.6 * s, attack: 0.002 });
+      this.noise(v, t, t + 0.025, { type: 'bandpass', freq: 2600, q: 1, peak: 0.5 * s, attack: 0.001 });
+      this.crackle(v, t + 0.01, t + (hard ? 0.15 : 0.07), hard ? 4 : 2, { type: 'bandpass', freq: 1500, peak: 0.3 * s, min: 0.008, max: 0.02 });  // grit / debris
+    } else if (surface === 'trim') {
+      this.noise(v, t, t + 0.03, { type: 'lowpass', freq: 1500, freqEnd: 300, peak: 0.6 * s, attack: 0.001 });               // muffled slap, no ring
+    } else {
+      for (const [f, a, dur] of [[1100, 0.3, 0.08], [2400, 0.18, 0.06]]) this.osc(v, 'sine', f, t, t + dur * k, { peak: a * s, attack: 0.001 });  // plate clank
+      this.noise(v, t, t + 0.02, { type: 'bandpass', freq: 2500, q: 1, peak: 0.5 * s, attack: 0.001 });
+    }
     if (hard) this.grunt(v, t + 0.02, t + 0.24, { f0: 150, f1: 95, formants: [550, 1000, 2400], peak: 0.7, attack: 0.02, breath: 0.3 });
     return v;
   }
   // Footstep: bright "tap" transient (3-4.5 kHz, where the HRTF gives 12-18 dB of interaural level difference so the step is
-  // located) plus a quieter heel thud; pitch randomized per step. Same distance model as everything else so it stays audible at 600+ units.
-  footstep(origin, local) {
-    const v = this.voice(this.bodyBus(local), origin, { local, gain: T.footstep }); const t = this.now(); const r = this.rand();
-    this.noise(v, t, t + 0.018, { type: 'bandpass', freq: 3200 + r * 1300, q: 1.5, peak: 1, attack: 0.0007, hold: 0.003 });
-    this.noise(v, t, t + 0.03, { type: 'bandpass', freq: 1800, q: 1, peak: 0.5, attack: 0.001 });
-    this.noise(v, t, t + 0.045, { type: 'lowpass', freq: 500, freqEnd: 150, peak: 0.35, attack: 0.002 });
-    this.osc(v, 'sine', 150 + r * 50, t, t + 0.04, { f1: 70, peak: 0.25, attack: 0.001 });
+  // located) plus a quieter heel thud; pitch randomized per step. Same distance model as everything else so it stays audible at
+  // 600+ units. Four families by floor material (surface, see SURFACE_OF): plate = tap + click + heel thud + faint clank partials,
+  // grate = tap + short inharmonic ring of the bars and hardly any thud, stone = duller tap + grit + a heavier, shorter thud,
+  // trim = muffled tap with little high end (a 2.8 kHz tick remains so it can still be located). All four calibrated to the
+  // same peak (CUE_TRIM) so an enemy step is equally audible on every floor.
+  footstep(origin, local, surface = 'plate') {
+    const key = surface === 'plate' ? 'footstep' : 'footstep' + surface[0].toUpperCase() + surface.slice(1);
+    const v = this.voice(this.bodyBus(local), origin, { local, gain: T[key] ?? T.footstep }); const t = this.now(); const r = this.rand();
+    if (surface === 'grate') {
+      this.noise(v, t, t + 0.016, { type: 'bandpass', freq: 3600 + r * 1300, q: 1.5, peak: 1, attack: 0.0007, hold: 0.002 });
+      for (const [f, a, dur] of [[1350, 0.35, 0.09], [2700, 0.25, 0.07], [4100, 0.12, 0.05]]) this.osc(v, 'sine', f * (0.97 + r * 0.06), t, t + dur, { peak: a, attack: 0.001, detune: (r - 0.5) * 20 });
+      this.noise(v, t, t + 0.02, { type: 'bandpass', freq: 1800, q: 1, peak: 0.3, attack: 0.001 });
+      this.osc(v, 'sine', 140 + r * 40, t, t + 0.03, { f1: 70, peak: 0.12, attack: 0.001 });
+    } else if (surface === 'stone') {
+      this.noise(v, t, t + 0.016, { type: 'bandpass', freq: 3300 + r * 900, q: 1.3, peak: 0.8, attack: 0.0007, hold: 0.002 });
+      this.noise(v, t + 0.002, t + 0.035, { type: 'bandpass', freq: 1200, q: 0.8, peak: 0.5, attack: 0.002 });
+      this.noise(v, t, t + 0.04, { type: 'lowpass', freq: 900, freqEnd: 200, peak: 0.6, attack: 0.001 });
+      this.osc(v, 'sine', 120 + r * 40, t, t + 0.045, { f1: 55, peak: 0.4, attack: 0.001 });
+    } else if (surface === 'trim') {
+      this.noise(v, t, t + 0.014, { type: 'bandpass', freq: 2800 + r * 600, q: 1.2, peak: 0.45, attack: 0.001, hold: 0.002 });
+      this.noise(v, t, t + 0.03, { type: 'lowpass', freq: 1500, freqEnd: 400, peak: 0.7, attack: 0.001 });
+      this.noise(v, t, t + 0.05, { type: 'lowpass', freq: 600, freqEnd: 150, peak: 0.4, attack: 0.002 });
+      this.osc(v, 'sine', 160 + r * 40, t, t + 0.04, { f1: 80, peak: 0.25, attack: 0.001 });
+    } else {
+      this.noise(v, t, t + 0.018, { type: 'bandpass', freq: 3200 + r * 1300, q: 1.5, peak: 1, attack: 0.0007, hold: 0.003 });
+      this.noise(v, t, t + 0.03, { type: 'bandpass', freq: 1800, q: 1, peak: 0.5, attack: 0.001 });
+      this.noise(v, t, t + 0.045, { type: 'lowpass', freq: 500, freqEnd: 150, peak: 0.35, attack: 0.002 });
+      this.osc(v, 'sine', 150 + r * 50, t, t + 0.04, { f1: 70, peak: 0.25, attack: 0.001 });
+      this.osc(v, 'sine', 1100 * (0.97 + r * 0.06), t, t + 0.04, { peak: 0.12, attack: 0.001 }); this.osc(v, 'sine', 2400 * (0.97 + r * 0.06), t, t + 0.03, { peak: 0.08, attack: 0.001 });
+    }
     return v;
+  }
+  // Surface family under a player at `origin` (box centre, feet PM.mins[2] below): a thin box traced straight down through
+  // cg.game.world, player clip skipped (weapons and sound go through it), nonsolid brushes (pads, lava, triggers) ignored by
+  // the tracer, so the drawn floor decides. No world (menu, offline tools) or nothing within SURFACE_REACH -> 'plate'.
+  surfaceAt(origin, cg) {
+    const world = cg && cg.game && cg.game.world;
+    if (!origin || !world || !world.brushes) return 'plate';
+    const feet = origin[2] + PM.mins[2];
+    const tr = traceBox(world, [origin[0], origin[1], feet + 8], [origin[0], origin[1], feet - SURFACE_REACH], [-8, -8, 0], [8, 8, 0], null, { skipFlags: BRUSH_FLAGS.PLAYERCLIP });
+    const mat = tr.brush && tr.brush.mat;
+    return (mat && SURFACE_OF[mat]) || 'plate';
   }
   // Pain in four tiers by remaining health (Q3 pain100/75/50/25): light (>= 75), mid (50-74), heavy (25-49), critical (< 25):
   // lower, longer and shakier as health drops. `id` is the grunting player (unused here; read by the live audit's instrumentation).
@@ -614,6 +691,10 @@ export class AudioEngine {
       rocketExplode: (o) => this.explode(W.ROCKET, o.origin), plasmaExplode: (o) => this.explode(W.PLASMA, o.origin),
       bulletImpact: (o) => this.impact(W.MACHINEGUN, o.origin), railImpact: (o) => this.impact(W.RAIL, o.origin), gauntletImpact: (o) => this.impact(W.GAUNTLET, o.origin), lgHit: (o) => this.lgHit(o.origin),
       jump: (o) => this.jump(o.origin, o.local), landSoft: (o) => this.land(o.origin, o.local, false), landHard: (o) => this.land(o.origin, o.local, true), footstep: (o) => this.footstep(o.origin, o.local),
+      footstepGrate: (o) => this.footstep(o.origin, o.local, 'grate'), footstepStone: (o) => this.footstep(o.origin, o.local, 'stone'), footstepTrim: (o) => this.footstep(o.origin, o.local, 'trim'),
+      landSoftGrate: (o) => this.land(o.origin, o.local, false, 'grate'), landHardGrate: (o) => this.land(o.origin, o.local, true, 'grate'),
+      landSoftStone: (o) => this.land(o.origin, o.local, false, 'stone'), landHardStone: (o) => this.land(o.origin, o.local, true, 'stone'),
+      landSoftTrim: (o) => this.land(o.origin, o.local, false, 'trim'), landHardTrim: (o) => this.land(o.origin, o.local, true, 'trim'),
       painLight: (o) => this.pain(o.origin, o.local, 80), painMid: (o) => this.pain(o.origin, o.local, 60), painHeavy: (o) => this.pain(o.origin, o.local, 40), painCritical: (o) => this.pain(o.origin, o.local, 10),
       death: (o) => this.death(o.origin, o.local, false), gib: (o) => this.death(o.origin, o.local, true),
       pickupHealth: (o) => this.pickup('health25', o.origin, o.local), pickupMega: (o) => this.pickup('mega', o.origin, o.local), pickupArmor: (o) => this.pickup('armorRed', o.origin, o.local),
@@ -655,11 +736,11 @@ export class AudioEngine {
       // a kill), and the pain window is reset so the freshly spawned player grunts at once when hit
       case EV.DEATH: this.pendingPain.delete(e.id); this.painDebounce.delete(e.id); this.death(origin, local, e.gib); break;
       case EV.JUMP: this.jump(origin, local); break;
-      case EV.LAND: this.land(origin, local, !!e.hard); break;
+      case EV.LAND: this.land(origin, local, !!e.hard, this.surfaceAt(origin, cg)); break;
       case EV.FOOTSTEP: {
         // pmove emits one per bob cycle; guard against duplicate deliveries (redundant command batches) within 80 ms
         const t = this.now(); if (t - (this.lastFootstep.get(e.id) || -1) < 0.08) break; this.lastFootstep.set(e.id, t);
-        this.footstep(origin, local); break;
+        this.footstep(origin, local, this.surfaceAt(origin, cg)); break;
       }
       case EV.PICKUP: this.pickup(e.itemType, e.origin || origin, local); break;
       case EV.ITEM_RESPAWN: this.itemRespawn(e.itemType, e.origin); break;

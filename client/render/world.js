@@ -148,6 +148,21 @@ function patchBlock(src, startMarker, fn) {
 }
 const RE_DIRECT = 'RE_Direct( directLight, geometryPosition, geometryNormal, geometryViewDir, geometryClearcoatNormal, material, reflectedLight );';
 const MIX = (d, s) => `reflectedLight.directDiffuse = mix( ${d}, reflectedLight.directDiffuse, ${MAP_LIGHT_DIFFUSE.toFixed(2)} ); reflectedLight.directSpecular = mix( ${s}, reflectedLight.directSpecular, ${MAP_LIGHT_SPECULAR.toFixed(2)} );`;
+// Every lit material (world, players, items, viewmodel) evaluates all NUM_POINT_LIGHTS per fragment: the 12 parked LightPool
+// lights, the item glow lights and every map light, ~31 on a duel map. three r169's getPointLightInfo() windows the falloff to
+// exactly 0 beyond `distance` and sets directLight.visible = (color != 0), but the stock chunk still runs the full GGX +
+// Lambert BRDF for the invisible ones, so a fragment paid for 31 lights while 2-5 reach it. Guarding RE_Direct with that flag
+// skips them with bit-identical output (an invisible light adds exactly 0). Patched into the global chunk before any program
+// compiles; the world's own chunk below is derived from it. Measured with tools/scratch/perf_probe.mjs at 1080p on the six
+// Lava Spire spawn views (GPU timer queries, medians of 4 x 120 frames, old and new build interleaved under the same load):
+// 1.84 / 1.95 ms -> 1.48 / 1.51 ms per frame (-21 %; up to -38 % on the crater views), against a 1.25 -> 0.75 ms idle
+// run where removing every point light outright gave 0.55: the guard recovers most of the light cost on every map, and
+// the frames differ from the old build only where the item pickups spin (0.03-0.5 % of pixels, same as two captures of
+// the old build). A depth pre-pass was tried too and rejected: +0.1 ms (an extra geometry pass buys nothing once the
+// per-fragment cost is this low).
+THREE.ShaderChunk.lights_fragment_begin = patchBlock(THREE.ShaderChunk.lights_fragment_begin, '#if ( NUM_POINT_LIGHTS > 0 )', (b) => b
+  .replace(RE_DIRECT, `if ( directLight.visible ) {\n\t\t\t${RE_DIRECT}\n\t\t}`));
+if (!THREE.ShaderChunk.lights_fragment_begin.includes('if ( directLight.visible ) {')) console.warn('point light visibility guard did not apply (three.js chunk changed?)');
 let worldLightsChunk = THREE.ShaderChunk.lights_fragment_begin;
 worldLightsChunk = patchBlock(worldLightsChunk, '#if ( NUM_POINT_LIGHTS > 0 )', (b) => b
   .replace('PointLight pointLight;', 'PointLight pointLight;\n\tvec3 prevDiffuse, prevSpecular;')

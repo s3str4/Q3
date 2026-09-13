@@ -9,7 +9,9 @@
 // left, right, above, below) and must never be quieter than the own cue in any of them.
 // usage: node tools/audio_measure.mjs [--port 27981] [--out .evidence/audio] [--calibrate] [--no-wav] [--headed]
 //        [--only rocketFire,rail] (regex filter: render matching cues only, print the table, skip rules) [--limiter off]
-//        [--dirs] (with --only: also print the directional variants)
+//        [--dirs] (with --only: also print the directional variants and the binaural dB(A) per direction vs the front)
+//        [--comp '{"back":[-0.5,1,6,0]}'] (override HRTF_COMP hemisphere entries for this run: iterate on the directional
+//        compensation without editing audio.js; the JSON's keys replace the engine's entries)
 //        --hrtf: measure Chrome's raw HRTF panner response (L/R dB vs a direct connection) per direction and frequency
 //        -> .evidence/audio/hrtf.json; the basis of HRTF_COMP in client/audio/audio.js
 //        --live [seconds]: instead of offline renders, play a real practice match vs a bot in the browser and sample the live
@@ -47,6 +49,11 @@ const CUES = [
   { name: 'gauntletImpact', kind: 'world', target: -14, maxDur: 0.2 }, { name: 'lgHit', kind: 'world', target: -14, maxDur: 0.12 },
   { name: 'jump', kind: 'dual', target: -14, maxDur: 0.25 }, { name: 'landSoft', kind: 'dual', target: -16, maxDur: 0.15 }, { name: 'landHard', kind: 'dual', target: -10, maxDur: 0.35 },
   { name: 'footstep', kind: 'dual', target: -14, maxDur: 0.1 },
+  // surface families (footstep = steel plates): same loudness target, own recipes; the land variants match the soft / hard tiers
+  { name: 'footstepGrate', kind: 'dual', target: -14, maxDur: 0.12 }, { name: 'footstepStone', kind: 'dual', target: -14, maxDur: 0.1 }, { name: 'footstepTrim', kind: 'dual', target: -14, maxDur: 0.1 },
+  { name: 'landSoftGrate', kind: 'dual', target: -16, maxDur: 0.2 }, { name: 'landHardGrate', kind: 'dual', target: -10, maxDur: 0.4 },
+  { name: 'landSoftStone', kind: 'dual', target: -16, maxDur: 0.15 }, { name: 'landHardStone', kind: 'dual', target: -10, maxDur: 0.35 },
+  { name: 'landSoftTrim', kind: 'dual', target: -16, maxDur: 0.15 }, { name: 'landHardTrim', kind: 'dual', target: -10, maxDur: 0.35 },
   { name: 'painLight', kind: 'dual', target: -10, maxDur: 0.3 }, { name: 'painMid', kind: 'dual', target: -9.5, maxDur: 0.4 }, { name: 'painHeavy', kind: 'dual', target: -9, maxDur: 0.5 }, { name: 'painCritical', kind: 'dual', target: -8, maxDur: 0.65 },
   { name: 'death', kind: 'dual', target: -8, maxDur: 1.0 }, { name: 'gib', kind: 'dual', target: -6, maxDur: 0.6 },
   { name: 'pickupHealth', kind: 'dual', target: -12, maxDur: 0.35 }, { name: 'pickupMega', kind: 'dual', target: -10, maxDur: 0.9 }, { name: 'pickupArmor', kind: 'dual', target: -12, maxDur: 0.5 },
@@ -87,9 +94,14 @@ await page.evaluate(() => {
     const mod = await import('/client/audio/audio.js');
     const sr = 48000, seconds = spec.seconds || 2.5;
     const ctx = new OfflineAudioContext(2, Math.ceil(sr * seconds), sr);
+    if (spec.comp) for (const [k, v] of Object.entries(spec.comp)) mod.HRTF_COMP[k] = v;   // --comp: try a compensation table without editing audio.js
     const eng = new mod.AudioEngine({ context: ctx, ambient: !!spec.ambient, limiter: spec.limiter !== false, seed: 7 });
     eng.init(); eng.setVolume(1); eng.updateListener([0, 0, 0], [0, 0, 0]);
     const cg = { localId: 1, remote: new Map(spec.remote || []), game: null, remoteProjectiles: [] };
+    // spec.world: [{ mins, maxs, mat }] -> a tiny brush world under cg.game.world, so FOOTSTEP / LAND events resolve their surface
+    if (spec.world) { const { boxBrush } = await import('/shared/brush.js'); cg.game = { world: { brushes: spec.world.map((b) => boxBrush(b.mins, b.maxs, { mat: b.mat, flags: b.flags | 0, nonsolid: !!b.nonsolid })) } }; }
+    const footCalls = []; const foot0 = eng.footstep.bind(eng); eng.footstep = (o, l, s) => { footCalls.push({ kind: 'footstep', surface: s, local: !!l }); return foot0(o, l, s); };
+    const land0 = eng.land.bind(eng); eng.land = (o, l, h, s) => { footCalls.push({ kind: 'land', surface: s, hard: !!h, local: !!l }); return land0(o, l, h, s); };
     if (spec.probe) { const o = ctx.createOscillator(); o.frequency.value = 1000; const g = ctx.createGain(); g.gain.value = spec.probe; o.connect(g); g.connect(eng.master); o.start(0); o.stop(1.2); }
     // Chrome's DynamicsCompressor starts a fresh context with its gain ramped down (~12 dB loss on a burst at t=0, settled by
     // ~0.2 s): trigger the cues at T0 so they are measured the way a live, long-running context plays them.
@@ -142,25 +154,30 @@ await page.evaluate(() => {
     const aw = new Float64Array(NF / 2 + 1); for (let k = 0; k <= NF / 2; k++) { const f = k * sr / NF, f2 = f * f; const r = 12194 ** 2 * f2 * f2 / ((f2 + 20.6 ** 2) * Math.sqrt((f2 + 107.7 ** 2) * (f2 + 737.9 ** 2)) * (f2 + 12194 ** 2)); aw[k] = k === 0 ? 0 : Math.pow(10, (20 * Math.log10(r) + 2.0) / 10); }
     const k300 = Math.ceil(300 * NF / sr);
     const re = new Float64Array(NF), im = new Float64Array(NF);
-    const analyze = (i0) => { // -> { ms: mean square (window-power corrected), msA: A-weighted mean square, sub: mean square below 300 Hz }
-      re.fill(0); im.fill(0); for (let i = 0; i < WN; i++) { const j = i0 + i; re[i] = j >= 0 && j < n ? (L[j] + R[j]) / 2 * hann[i] : 0; }
+    // ch: 0 = mono mix (L+R)/2, 1 = left, 2 = right
+    const analyze = (i0, ch = 0) => { // -> { ms: mean square (window-power corrected), msA: A-weighted mean square, sub: mean square below 300 Hz }
+      re.fill(0); im.fill(0); for (let i = 0; i < WN; i++) { const j = i0 + i; re[i] = j >= 0 && j < n ? (ch === 1 ? L[j] : ch === 2 ? R[j] : (L[j] + R[j]) / 2) * hann[i] : 0; }
       fft(re, im); let ms = 0, msA = 0, sub = 0; for (let k = 0; k <= NF / 2; k++) { const p = (re[k] * re[k] + im[k] * im[k]) * (k === 0 || k === NF / 2 ? 1 : 2); ms += p; msA += p * aw[k]; if (k < k300) sub += p; }
       const norm = 1 / (NF * WN * wpow); return { ms: ms * norm, msA: msA * norm, sub: sub * norm };
     };
-    let aMom = 0; const thr40 = Math.pow(10, -40 / 20); let f40 = -1, l40 = -1;
+    // aMomB = binaural A-weighted momentary level: the power mean of the two ears' A-weighted mean squares, max over the same
+    // windows. The mono mix under-reads a lateral source (the far ear is 7-25 dB down and the interaural delay comb-filters
+    // L+R), so the directional loudness rule is asserted on this one: what a headphone listener sums is both ears' power.
+    let aMom = 0, aMomB = 0; const thr40 = Math.pow(10, -40 / 20); let f40 = -1, l40 = -1;
     for (let i = 0; i < n; i++) { const a = Math.abs((L[i] + R[i]) / 2); if (a > thr40) { if (f40 < 0) f40 = i; l40 = i; } }
-    if (first >= 0) for (let i0 = Math.max(0, first - WN); i0 <= Math.min(n - 1, last); i0 += Math.round(sr * 0.01)) { const r = analyze(i0); if (r.msA > aMom) aMom = r.msA; }
+    if (first >= 0) for (let i0 = Math.max(0, first - WN); i0 <= Math.min(n - 1, last); i0 += Math.round(sr * 0.01)) { const r = analyze(i0); if (r.msA > aMom) aMom = r.msA; const b = (analyze(i0, 1).msA + analyze(i0, 2).msA) / 2; if (b > aMomB) aMomB = b; }
     // extent mean: windows at hop WN/2 centred over [f40, l40]; each window accounts for hop samples of energy, so the mean is
     // total energy / extent length and a cue shorter than one window is not diluted by the silence after it
     let sumA = 0, sumMs = 0, sumSub = 0; const hop = WN / 2; let nw = 0;
     if (f40 >= 0) for (let i0 = f40 - hop; i0 < l40 - hop + 1; i0 += hop) { const r = analyze(i0); sumA += r.msA; sumMs += r.ms; sumSub += r.sub; nw++; }
     const ext = l40 - f40 + 1, dBp = (p) => p > 0 ? +(10 * Math.log10(p)).toFixed(2) : -120;
-    const loud = { aMom: dBp(aMom), aMean: nw ? dBp(sumA * hop / ext) : -120, sub300: nw && sumMs > 0 ? +(sumSub / sumMs).toFixed(3) : 0 };
-    return { peak: dB(Math.max(peakL, peakR)), peakL: dB(peakL), peakR: dB(peakR), rms: dB(rms), duration: first < 0 ? 0 : +((last - first + 1) / sr).toFixed(3), start: first < 0 ? null : +(first / sr).toFixed(3), ...loud, env, spec: spec2, checks, peakHz, tierBands, painCalls, toneCalls, maxPainAlive, maxVoices, final: eng.stats(), created: eng.counters.created, spatial: eng.counters.spatial, dropped: eng.counters.dropped, trims: mod.CUE_TRIM, remoteGain: mod.REMOTE_GAIN, hrtfComp: mod.HRTF_COMP, wav, sr: sr / 2 };
+    const loud = { aMom: dBp(aMom), aMomB: dBp(aMomB), aMean: nw ? dBp(sumA * hop / ext) : -120, sub300: nw && sumMs > 0 ? +(sumSub / sumMs).toFixed(3) : 0 };
+    return { peak: dB(Math.max(peakL, peakR)), peakL: dB(peakL), peakR: dB(peakR), rms: dB(rms), duration: first < 0 ? 0 : +((last - first + 1) / sr).toFixed(3), start: first < 0 ? null : +(first / sr).toFixed(3), ...loud, env, spec: spec2, checks, peakHz, tierBands, painCalls, toneCalls, footCalls, maxPainAlive, maxVoices, final: eng.stats(), created: eng.counters.created, spatial: eng.counters.spatial, dropped: eng.counters.dropped, trims: mod.CUE_TRIM, remoteGain: mod.REMOTE_GAIN, hrtfComp: mod.HRTF_COMP, wav, sr: sr / 2 };
   };
 });
 // one retry: a render that hit the protocol timeout is re-issued in a fresh OfflineAudioContext (renders are deterministic)
-const render = async (spec) => { const s = { ...spec, limiter: args.limiter === 'off' ? false : spec.limiter }; try { return await page.evaluate((s) => window.__render(s), s); } catch (e) { console.error('render failed, retrying once:', String(e).split('\n')[0]); return page.evaluate((s) => window.__render(s), s); } };
+const compOverride = args.comp ? JSON.parse(String(args.comp)) : null;
+const render = async (spec) => { const s = { ...spec, limiter: args.limiter === 'off' ? false : spec.limiter, comp: compOverride }; try { return await page.evaluate((s) => window.__render(s), s); } catch (e) { console.error('render failed, retrying once:', String(e).split('\n')[0]); return page.evaluate((s) => window.__render(s), s); } };
 const only = args.only ? new RegExp(String(args.only).split(',').join('|')) : null;
 
 const rows = []; let trims = null, remoteGain = 1, hrtfComp = null;
@@ -179,17 +196,18 @@ for (const c of CUES) {
   for (const v of variants) {
     const r = await render({ ...base, cues: v.cues, wav: !!v.wav && !args['no-wav'] });
     trims = r.trims; remoteGain = r.remoteGain; hrtfComp = r.hrtfComp;
-    const row = { cue: c.name, variant: v.label, dist: v.d, peak: r.peak, peakL: r.peakL, peakR: r.peakR, rms: r.rms, aMom: r.aMom, aMean: r.aMean, sub300: r.sub300, duration: r.duration, voicesBeforeGc: r.checks.beforeGc?.voices, voicesAfterGc: r.checks.afterGc?.voices, loopsAfterGc: r.checks.afterGc?.loops, created: r.final.created, killed: r.final.killed };
+    const row = { cue: c.name, variant: v.label, dist: v.d, peak: r.peak, peakL: r.peakL, peakR: r.peakR, rms: r.rms, aMom: r.aMom, aMomB: r.aMomB, aMean: r.aMean, sub300: r.sub300, duration: r.duration, voicesBeforeGc: r.checks.beforeGc?.voices, voicesAfterGc: r.checks.afterGc?.voices, loopsAfterGc: r.checks.afterGc?.loops, created: r.final.created, killed: r.final.killed };
     // weapon fires: also the pre-limiter peak (own and point blank), the level the limiter threshold is compared against
     if (WEAPON_FIRE.includes(c.name) && v.d === 0) row.peakPre = (await render({ ...base, cues: v.cues, limiter: false })).peak;
     rows.push(row);
     if ((v.label === 'own') || (c.kind === 'world' && v.d === 0)) sheet.push({ name: c.name, env: r.env, spec: r.spec, peak: r.peak, duration: r.duration });
     if (r.wav && !args['no-wav']) writeWav(path.join(outDir, `${c.name}.wav`), r.wav, r.sr);
-    process.stdout.write(`${c.name.padEnd(16)} ${v.label.padEnd(12)} ${String(v.d).padStart(5)}u  peak ${String(r.peak).padStart(7)} dBFS${row.peakPre !== undefined ? ` (pre ${String(row.peakPre).padStart(6)})` : ''.padEnd(13)}  L/R ${String(r.peakL).padStart(7)}/${String(r.peakR).padEnd(7)}  rms ${String(r.rms).padStart(7)}  A-mom ${String(r.aMom).padStart(7)}  A-mean ${String(r.aMean).padStart(7)}  <300Hz ${String(Math.round(r.sub300 * 100)).padStart(3)}%  dur ${r.duration}s\n`);
+    process.stdout.write(`${c.name.padEnd(16)} ${v.label.padEnd(12)} ${String(v.d).padStart(5)}u  peak ${String(r.peak).padStart(7)} dBFS${row.peakPre !== undefined ? ` (pre ${String(row.peakPre).padStart(6)})` : ''.padEnd(13)}  L/R ${String(r.peakL).padStart(7)}/${String(r.peakR).padEnd(7)}  rms ${String(r.rms).padStart(7)}  A-mom ${String(r.aMom).padStart(7)}  A-bin ${String(r.aMomB).padStart(7)}  A-mean ${String(r.aMean).padStart(7)}  <300Hz ${String(Math.round(r.sub300 * 100)).padStart(3)}%  dur ${r.duration}s\n`);
   }
-  if (c.kind === 'dual' && (!only || args.dirs)) { // directional summary: enemy - own in dB per direction, 100 u and 600 u (model -5.46 dB)
+  if (c.kind === 'dual' && (!only || args.dirs)) { // directional summary: enemy - own in dB per direction, 100 u and 600 u (model -5.46 dB), and binaural dB(A) vs front
     const own = get(c.name, 'own', 0).peak;
     process.stdout.write(`${''.padEnd(16)} vs own:  ` + DIR_DIST.map((d) => `${d}u ` + Object.keys(DIRS).map((dn) => `${dn} ${(get(c.name, 'enemy-' + dn, d).peak - own - distanceDb(d)).toFixed(1).padStart(5)}`).join(' ')).join('   |   ') + '\n');
+    process.stdout.write(`${''.padEnd(16)} dB(A) vs front: ` + DIR_DIST.map((d) => { const f = get(c.name, 'enemy-front', d).aMomB; return `${d}u ` + Object.keys(DIRS).map((dn) => `${dn} ${(get(c.name, 'enemy-' + dn, d).aMomB - f).toFixed(1).padStart(5)}`).join(' '); }).join('   |   ') + '\n');
   }
 }
 if (only) { await browser.close(); await server.close(); process.exit(0); }
@@ -271,6 +289,23 @@ const originCases = {
 };
 console.log('origin resolution:', JSON.stringify(originCases));
 
+// ---- footstep / landing surface: FOOTSTEP and LAND carry no surface; the engine traces straight down from the player's
+// origin against cg.game.world and voices the family of the brush it stands on (materials.js key -> plate / grate / stone / trim,
+// see SURFACE_OF in audio.js). Tiny one-brush worlds through the real event() path. ----
+const FLOOR = (mat, extra = {}) => ({ mins: [-64, -64, -32], maxs: [64, 64, 0], mat, ...extra });
+const ORIGIN = [0, 0, 24]; // player box centre: feet (mins z -24) on the floor at z 0
+const STEP = (id, origin) => ({ type: EV.FOOTSTEP, id, origin });
+const LANDE = (id, origin, hard) => ({ type: EV.LAND, id, origin, hard });
+const surfaceCase = async (world, e) => (await render({ world, frames: [{ at: 0, events: [e] }] })).footCalls[0] || null;
+const surfaces = {};
+for (const [mat, want] of [['floor', 'plate'], ['metal', 'plate'], ['tech', 'plate'], ['floor2', 'grate'], ['grate', 'grate'], ['concrete', 'stone'], ['stone', 'stone'], ['wall', 'stone'], ['trim', 'trim'], ['trim_red', 'trim'], ['glow_warm', 'trim']]) surfaces[mat] = { want, got: await surfaceCase([FLOOR(mat)], STEP(1, ORIGIN)) };
+surfaces.air = { want: 'plate', got: await surfaceCase([FLOOR('stone', { mins: [-64, -64, -300], maxs: [64, 64, -200] })], STEP(1, ORIGIN)) };            // nothing within reach below: default family
+surfaces.padOverStone = { want: 'stone', got: await surfaceCase([FLOOR('stone'), { mins: [-48, -48, 0], maxs: [48, 48, 4], mat: 'jumppad', nonsolid: true }], STEP(1, [0, 0, 28])) }; // the pad brush is nonsolid: the floor under it decides
+surfaces.clipOverGrate = { want: 'grate', got: await surfaceCase([FLOOR('floor2'), { mins: [-48, -48, 0], maxs: [48, 48, 8], mat: 'clip', flags: 6 }], STEP(1, [0, 0, 32])) };    // player clip is skipped by the trace
+surfaces.remoteLand = { want: 'grate', got: await surfaceCase([FLOOR('floor2')], LANDE(2, ORIGIN, true)) };                                                  // remote LAND (origin in the event)
+surfaces.noWorld = { want: 'plate', got: (await render({ frames: [{ at: 0, events: [STEP(1, ORIGIN)] }] })).footCalls[0] || null };                           // no world at all (menu, tests)
+console.log('surfaces:', JSON.stringify(surfaces));
+
 // ---- rules ----
 const failures = [], checks = [];
 const rule = (ok, text) => { checks.push({ ok, text }); if (!ok) failures.push(text); };
@@ -325,6 +360,17 @@ for (const c of CUES.filter((c) => c.kind === 'dual')) for (const d of DIR_DIST)
   const mx = Math.max(...Object.keys(DIRS).map((dn) => get(c.name, 'enemy-' + dn, d).peak));
   rule(mx <= front + 4, `directional overshoot (${d}u): ${c.name} loudest direction ${mx} <= front ${front} + 4`);
 }
+// ... and one loudness per cue whichever way it comes from: the binaural A-weighted momentary level (power mean of the two
+// ears, see aMomB in the renderer) of every direction within +-2 dB(A) of the same cue straight ahead, at 100 u and 600 u.
+const DIR_TOL = 2;
+const directional = {};
+for (const c of CUES.filter((c) => c.kind === 'dual')) {
+  directional[c.name] = { own: get(c.name, 'own', 0).peak, ownA: get(c.name, 'own', 0).aMomB };
+  for (const d of DIR_DIST) {
+    const f = get(c.name, 'enemy-front', d).aMomB; directional[c.name]['front' + d] = f;
+    for (const dn of Object.keys(DIRS).filter((k) => k !== 'front')) { const x = +(get(c.name, 'enemy-' + dn, d).aMomB - f).toFixed(2); directional[c.name][dn + d] = x; rule(Math.abs(x) <= DIR_TOL, `directional loudness (${dn}, ${d}u): ${c.name} ${x >= 0 ? '+' : ''}${x} dB(A) vs front ${f} within +-${DIR_TOL}`); }
+  }
+}
 const fs600 = get('footstep', 'enemy', 600), fsR = get('footstep', 'enemy-right', 600), fsB = get('footstep', 'enemy-back', 100), mgB = get('machinegunFire', 'enemy-back', 100);
 rule(fsB.peak >= -14.6, `footstep 100u behind: peak ${fsB.peak} >= -14.6 dBFS`);
 rule(mgB.peak >= -7.8, `machinegun 100u behind: peak ${mgB.peak} >= -7.8 dBFS`);
@@ -333,6 +379,15 @@ rule(mgB.peak >= -7.8, `machinegun 100u behind: peak ${mgB.peak} >= -7.8 dBFS`);
 rule(originCases.unknown.created === 0 && originCases.unknown.dropped === 1, `unresolvable remote footstep (id 2, empty cg.remote) -> ${originCases.unknown.created} voices (expect 0), dropped ${originCases.unknown.dropped} (expect 1), peak ${originCases.unknown.peak}`);
 rule(originCases.known.created === 1 && originCases.known.spatial === 1 && Math.abs(originCases.known.peak - fs600.peak) <= 0.5, `remote footstep with cg.remote at 600u front -> ${originCases.known.created} voice, spatial ${originCases.known.spatial}, peak ${originCases.known.peak} (enemy@600 ${fs600.peak} +-0.5)`);
 rule(originCases.lastKnown.created === 2 && originCases.lastKnown.spatial === 2 && originCases.lastKnown.dropped === 0, `remote footstep after PAIN with origin, player gone from cg.remote -> ${originCases.lastKnown.created} voices (expect 2), spatial ${originCases.lastKnown.spatial} (expect 2), dropped ${originCases.lastKnown.dropped}`);
+for (const [k, s] of Object.entries(surfaces)) rule(!!s.got && s.got.surface === s.want, `surface resolution: ${k} -> ${s.got ? s.got.surface : 'no cue'} (expect ${s.want})`);
+rule(!!surfaces.remoteLand.got && surfaces.remoteLand.got.kind === 'land' && surfaces.remoteLand.got.hard && !surfaces.remoteLand.got.local, `surface resolution: remote hard LAND voiced as a remote hard land ${JSON.stringify(surfaces.remoteLand.got)}`);
+// the four footstep families stay one loudness (the enemy footstep rule is about being heard, not about the floor) and each
+// land variant keeps its soft / hard tier
+const fam = (n) => get(n, 'own', 0).peak;
+for (const n of ['footstepGrate', 'footstepStone', 'footstepTrim']) rule(Math.abs(fam(n) - fam('footstep')) <= 1.5, `footstep families one loudness: ${n} own ${fam(n)} within +-1.5 dB of footstep ${fam('footstep')}`);
+for (const s of ['Grate', 'Stone', 'Trim']) rule(Math.abs(fam('landSoft' + s) - fam('landSoft')) <= 1.5 && Math.abs(fam('landHard' + s) - fam('landHard')) <= 1.5, `land families one loudness: landSoft${s} ${fam('landSoft' + s)} vs ${fam('landSoft')}, landHard${s} ${fam('landHard' + s)} vs ${fam('landHard')} (+-1.5 dB)`);
+for (const s of ['', 'Grate', 'Stone', 'Trim']) rule(fam('landHard' + s) >= fam('landSoft' + s) + 3, `hard land louder than soft on ${s || 'plate'}: ${fam('landHard' + s)} >= ${fam('landSoft' + s)} + 3`);
+for (const s of ['Grate', 'Stone', 'Trim']) { const r6 = get('footstep' + s, 'enemy-right', 600); rule(get('footstep' + s, 'enemy', 600).peak >= -30 && Math.abs(r6.peakL - r6.peakR) >= 6, `enemy footstep${s} audible and located at 600u: peak ${get('footstep' + s, 'enemy', 600).peak} >= -30, |L-R| ${Math.abs(r6.peakL - r6.peakR).toFixed(2)} >= 6`); }
 rule(fs600.peak >= -30, `enemy footstep audible at 600u: peak ${fs600.peak} >= -30 dBFS`);
 rule(Math.abs(fsR.peakL - fsR.peakR) >= 6, `enemy footstep located at 600u (right side): |L-R| ${Math.abs(fsR.peakL - fsR.peakR).toFixed(2)} dB >= 6`);
 rule(get('respawnMajor', 'enemy', 1500).peak >= -24 && get('respawnMajor', 'enemy', 3000).peak >= -30, `major respawn map-wide: peak@1500 ${get('respawnMajor', 'enemy', 1500).peak} >= -24, @3000 ${get('respawnMajor', 'enemy', 3000).peak} >= -30`);
@@ -376,7 +431,7 @@ const png = await page.evaluate((tiles) => {
 }, sheet);
 fs.writeFileSync(path.join(outDir, 'palette.png'), Buffer.from(png, 'base64'));
 
-const report = { generated: new Date().toISOString(), remoteGain, hrtfComp, trims, makeupGainDb: makeup, originCases, rocketExplosionGainReductionDb: explGR, stressMix: { peak: stress.peak, gainReductionDb: stressGR, voicesAfter: stress.final.voices }, ambient: { peak: amb.peak, rms: amb.rms }, coalescing, painRate, rows, checks, failures, suggestedTrims: suggest, suggestedRemoteGain: suggestRemote, consoleErrors };
+const report = { generated: new Date().toISOString(), remoteGain, hrtfComp, trims, makeupGainDb: makeup, originCases, directional, surfaces, rocketExplosionGainReductionDb: explGR, stressMix: { peak: stress.peak, gainReductionDb: stressGR, voicesAfter: stress.final.voices }, ambient: { peak: amb.peak, rms: amb.rms }, coalescing, painRate, rows, checks, failures, suggestedTrims: suggest, suggestedRemoteGain: suggestRemote, consoleErrors };
 fs.writeFileSync(path.join(outDir, 'measure.json'), JSON.stringify(report, null, 2));
 console.log(`\n${checks.length - failures.length}/${checks.length} rules passed. Report: ${path.relative(process.cwd(), path.join(outDir, 'measure.json'))}, palette: ${path.relative(process.cwd(), path.join(outDir, 'palette.png'))}`);
 if (failures.length) { console.log('FAILURES:'); for (const f of failures) console.log(' - ' + f); }
