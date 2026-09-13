@@ -230,7 +230,7 @@ async function start(mode) {
   settings.name = mode.name || $('name').value.trim() || 'player'; settings.server = $('server').value.trim(); save();
   status('loading...');
   try {
-    audio.init(); audio.resume(); audio.setVolume(settings.vol); audio.announcerEnabled = settings.announcer !== false; audio.loadVoices().catch((err) => console.warn('[audio] voice pack', err));
+    audio.init(); audio.resume(); audio.setVolume(settings.vol); audio.announcerEnabled = settings.announcer !== false; audio.loadVoices().catch((err) => console.warn('[audio] voice pack', err)); audio.loadSamples().catch((err) => console.warn('[audio] sample pack', err));
     let transport, mapName = settings.map || DEFAULT_MAP, gameMode = settings.mode || 'duel';
     const ident = { skin: settings.skin, color: settings.color };
     const hostOpts = () => ({ mode: gameMode, rules: { physics: settings.physics, ...(rulesOverride || {}) }, log: (...m) => console.log('[host]', ...m) });
@@ -333,7 +333,7 @@ async function startDemo(demo) {
   if (running) return;
   status('loading demo...');
   try {
-    audio.init(); audio.resume(); audio.setVolume(settings.vol); audio.announcerEnabled = settings.announcer !== false; audio.loadVoices().catch((err) => console.warn('[audio] voice pack', err));
+    audio.init(); audio.resume(); audio.setVolume(settings.vol); audio.announcerEnabled = settings.announcer !== false; audio.loadVoices().catch((err) => console.warn('[audio] voice pack', err)); audio.loadSamples().catch((err) => console.warn('[audio] sample pack', err));
     const map = await loadArena(demo.map);
     ensureInput();
     running = true;

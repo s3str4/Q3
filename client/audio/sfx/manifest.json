@@ -1,0 +1,652 @@
+{
+ "machinegunFire": [
+  {
+   "file": "machinegunFire_1.wav",
+   "ms": 459,
+   "peakDb": -0.5,
+   "src": "pak0/sound/weapons/machinegun/machgf1b.wav"
+  },
+  {
+   "file": "machinegunFire_2.wav",
+   "ms": 539,
+   "peakDb": -0.2,
+   "src": "pak0/sound/weapons/machinegun/machgf2b.wav"
+  },
+  {
+   "file": "machinegunFire_3.wav",
+   "ms": 516,
+   "peakDb": 0,
+   "src": "pak0/sound/weapons/machinegun/machgf3b.wav"
+  },
+  {
+   "file": "machinegunFire_4.wav",
+   "ms": 530,
+   "peakDb": -0.1,
+   "src": "pak0/sound/weapons/machinegun/machgf4b.wav"
+  }
+ ],
+ "shotgunFire": [
+  {
+   "file": "shotgunFire.wav",
+   "ms": 975,
+   "peakDb": 0,
+   "src": "pak0/sound/weapons/shotgun/sshotf1b.wav"
+  }
+ ],
+ "rocketFire": [
+  {
+   "file": "rocketFire.wav",
+   "ms": 1750,
+   "peakDb": 0,
+   "src": "pak0/sound/weapons/rocket/rocklf1a.wav"
+  }
+ ],
+ "rocketLoop": [
+  {
+   "file": "rocketLoop.wav",
+   "ms": 2426,
+   "peakDb": 0,
+   "src": "pak0/sound/weapons/rocket/rockfly.wav"
+  }
+ ],
+ "railFire": [
+  {
+   "file": "railFire.wav",
+   "ms": 1611,
+   "peakDb": 0,
+   "src": "pak0/sound/weapons/railgun/railgf1a.wav"
+  }
+ ],
+ "plasmaFire": [
+  {
+   "file": "plasmaFire.wav",
+   "ms": 313,
+   "peakDb": 0,
+   "src": "pak0/sound/weapons/plasma/hyprbf1a.wav"
+  }
+ ],
+ "lightningLoop": [
+  {
+   "file": "lightningLoop.wav",
+   "ms": 917,
+   "peakDb": 0,
+   "src": "pak0/sound/weapons/lightning/lg_fire.wav"
+  }
+ ],
+ "gauntletFire": [
+  {
+   "file": "gauntletFire.wav",
+   "ms": 1473,
+   "peakDb": -9.1,
+   "src": "pak0/sound/weapons/melee/fstrun.wav"
+  }
+ ],
+ "weaponChange": [
+  {
+   "file": "weaponChange.wav",
+   "ms": 712,
+   "peakDb": -0.6,
+   "src": "pak0/sound/weapons/change.wav"
+  }
+ ],
+ "noAmmo": [
+  {
+   "file": "noAmmo.wav",
+   "ms": 465,
+   "peakDb": 0,
+   "src": "pak0/sound/weapons/noammo.wav"
+  }
+ ],
+ "rocketExplode": [
+  {
+   "file": "rocketExplode.wav",
+   "ms": 1461,
+   "peakDb": 0,
+   "src": "pak0/sound/weapons/rocket/rocklx1a.wav"
+  }
+ ],
+ "plasmaExplode": [
+  {
+   "file": "plasmaExplode.wav",
+   "ms": 1568,
+   "peakDb": 0,
+   "src": "pak0/sound/weapons/plasma/plasmx1a.wav"
+  }
+ ],
+ "railImpact": [
+  {
+   "file": "railImpact.wav",
+   "ms": 1568,
+   "peakDb": 0,
+   "src": "pak0/sound/weapons/plasma/plasmx1a.wav"
+  }
+ ],
+ "bulletImpact": [
+  {
+   "file": "bulletImpact_1.wav",
+   "ms": 500,
+   "peakDb": -0.1,
+   "src": "pak0/sound/weapons/machinegun/ric1.wav"
+  },
+  {
+   "file": "bulletImpact_2.wav",
+   "ms": 500,
+   "peakDb": -7.2,
+   "src": "pak0/sound/weapons/machinegun/ric2.wav"
+  },
+  {
+   "file": "bulletImpact_3.wav",
+   "ms": 250,
+   "peakDb": -0.9,
+   "src": "pak0/sound/weapons/machinegun/ric3.wav"
+  }
+ ],
+ "gauntletImpact": [
+  {
+   "file": "gauntletImpact.wav",
+   "ms": 980,
+   "peakDb": 0,
+   "src": "pak0/sound/weapons/melee/fstatck.wav"
+  }
+ ],
+ "lgHit": [
+  {
+   "file": "lgHit_1.wav",
+   "ms": 360,
+   "peakDb": -1.6,
+   "src": "pak0/sound/weapons/lightning/lg_hit.wav"
+  },
+  {
+   "file": "lgHit_2.wav",
+   "ms": 460,
+   "peakDb": -2.9,
+   "src": "pak0/sound/weapons/lightning/lg_hit2.wav"
+  },
+  {
+   "file": "lgHit_3.wav",
+   "ms": 356,
+   "peakDb": -3.4,
+   "src": "pak0/sound/weapons/lightning/lg_hit3.wav"
+  }
+ ],
+ "land": [
+  {
+   "file": "land.wav",
+   "ms": 541,
+   "peakDb": 0,
+   "src": "pak0/sound/player/land1.wav"
+  }
+ ],
+ "gib": [
+  {
+   "file": "gib.wav",
+   "ms": 1756,
+   "peakDb": 0,
+   "src": "pak0/sound/player/gibsplt1.wav"
+  }
+ ],
+ "gibImpact": [
+  {
+   "file": "gibImpact_1.wav",
+   "ms": 750,
+   "peakDb": 0,
+   "src": "pak0/sound/player/gibimp1.wav"
+  },
+  {
+   "file": "gibImpact_2.wav",
+   "ms": 897,
+   "peakDb": 0,
+   "src": "pak0/sound/player/gibimp2.wav"
+  },
+  {
+   "file": "gibImpact_3.wav",
+   "ms": 890,
+   "peakDb": 0,
+   "src": "pak0/sound/player/gibimp3.wav"
+  }
+ ],
+ "fallDamage": [
+  {
+   "file": "fallDamage.wav",
+   "ms": 435,
+   "peakDb": -11.4,
+   "src": "pak0/sound/player/sarge/fall1.wav"
+  }
+ ],
+ "footstepPlate": [
+  {
+   "file": "footstepPlate_1.wav",
+   "ms": 310,
+   "peakDb": -9.6,
+   "src": "pak0/sound/player/footsteps/clank1.wav"
+  },
+  {
+   "file": "footstepPlate_2.wav",
+   "ms": 209,
+   "peakDb": -12.9,
+   "src": "pak0/sound/player/footsteps/clank2.wav"
+  },
+  {
+   "file": "footstepPlate_3.wav",
+   "ms": 364,
+   "peakDb": -12.9,
+   "src": "pak0/sound/player/footsteps/clank3.wav"
+  },
+  {
+   "file": "footstepPlate_4.wav",
+   "ms": 276,
+   "peakDb": -12.5,
+   "src": "pak0/sound/player/footsteps/clank4.wav"
+  }
+ ],
+ "footstepGrate": [
+  {
+   "file": "footstepGrate_1.wav",
+   "ms": 219,
+   "peakDb": -2.4,
+   "src": "pak0/sound/player/footsteps/mech1.wav"
+  },
+  {
+   "file": "footstepGrate_2.wav",
+   "ms": 459,
+   "peakDb": -0.4,
+   "src": "pak0/sound/player/footsteps/mech2.wav"
+  },
+  {
+   "file": "footstepGrate_3.wav",
+   "ms": 296,
+   "peakDb": -0.1,
+   "src": "pak0/sound/player/footsteps/mech3.wav"
+  },
+  {
+   "file": "footstepGrate_4.wav",
+   "ms": 389,
+   "peakDb": -2.5,
+   "src": "pak0/sound/player/footsteps/mech4.wav"
+  }
+ ],
+ "footstepStone": [
+  {
+   "file": "footstepStone_1.wav",
+   "ms": 93,
+   "peakDb": -5,
+   "src": "pak0/sound/player/footsteps/step1.wav"
+  },
+  {
+   "file": "footstepStone_2.wav",
+   "ms": 153,
+   "peakDb": -6,
+   "src": "pak0/sound/player/footsteps/step2.wav"
+  },
+  {
+   "file": "footstepStone_3.wav",
+   "ms": 96,
+   "peakDb": -6,
+   "src": "pak0/sound/player/footsteps/step3.wav"
+  },
+  {
+   "file": "footstepStone_4.wav",
+   "ms": 96,
+   "peakDb": -6,
+   "src": "pak0/sound/player/footsteps/step4.wav"
+  }
+ ],
+ "footstepTrim": [
+  {
+   "file": "footstepTrim_1.wav",
+   "ms": 140,
+   "peakDb": -5,
+   "src": "pak0/sound/player/footsteps/boot1.wav"
+  },
+  {
+   "file": "footstepTrim_2.wav",
+   "ms": 140,
+   "peakDb": -10.8,
+   "src": "pak0/sound/player/footsteps/boot2.wav"
+  },
+  {
+   "file": "footstepTrim_3.wav",
+   "ms": 141,
+   "peakDb": -11,
+   "src": "pak0/sound/player/footsteps/boot3.wav"
+  },
+  {
+   "file": "footstepTrim_4.wav",
+   "ms": 140,
+   "peakDb": -11.6,
+   "src": "pak0/sound/player/footsteps/boot4.wav"
+  }
+ ],
+ "pickupHealthSmall": [
+  {
+   "file": "pickupHealthSmall.wav",
+   "ms": 166,
+   "peakDb": -5.2,
+   "src": "pak0/sound/items/n_health.wav"
+  }
+ ],
+ "pickupHealth": [
+  {
+   "file": "pickupHealth.wav",
+   "ms": 201,
+   "peakDb": -1.3,
+   "src": "pak0/sound/items/s_health.wav"
+  }
+ ],
+ "pickupHealthLarge": [
+  {
+   "file": "pickupHealthLarge.wav",
+   "ms": 333,
+   "peakDb": -5.2,
+   "src": "pak0/sound/items/l_health.wav"
+  }
+ ],
+ "pickupMega": [
+  {
+   "file": "pickupMega.wav",
+   "ms": 1250,
+   "peakDb": 0,
+   "src": "pak0/sound/items/m_health.wav"
+  }
+ ],
+ "pickupShard": [
+  {
+   "file": "pickupShard.wav",
+   "ms": 163,
+   "peakDb": 0,
+   "src": "pak0/sound/misc/ar1_pkup.wav"
+  }
+ ],
+ "pickupArmor": [
+  {
+   "file": "pickupArmor.wav",
+   "ms": 634,
+   "peakDb": 0,
+   "src": "pak0/sound/misc/ar2_pkup.wav"
+  }
+ ],
+ "pickupWeapon": [
+  {
+   "file": "pickupWeapon.wav",
+   "ms": 831,
+   "peakDb": 0,
+   "src": "pak0/sound/misc/w_pkup.wav"
+  }
+ ],
+ "pickupAmmo": [
+  {
+   "file": "pickupAmmo.wav",
+   "ms": 465,
+   "peakDb": -0.5,
+   "src": "pak0/sound/misc/am_pkup.wav"
+  }
+ ],
+ "itemRespawn": [
+  {
+   "file": "itemRespawn.wav",
+   "ms": 596,
+   "peakDb": -8,
+   "src": "pak0/sound/items/respawn1.wav"
+  }
+ ],
+ "jumppad": [
+  {
+   "file": "jumppad.wav",
+   "ms": 1110,
+   "peakDb": 0,
+   "src": "pak0/sound/world/jumppad.wav"
+  }
+ ],
+ "teleportIn": [
+  {
+   "file": "teleportIn.wav",
+   "ms": 1385,
+   "peakDb": 0,
+   "src": "pak0/sound/world/telein.wav"
+  }
+ ],
+ "teleportOut": [
+  {
+   "file": "teleportOut.wav",
+   "ms": 549,
+   "peakDb": -1.4,
+   "src": "pak0/sound/world/teleout.wav"
+  }
+ ],
+ "hit": [
+  {
+   "file": "hit.wav",
+   "ms": 532,
+   "peakDb": -0.5,
+   "src": "pak6-misc/sound/feedback/hit.wav"
+  }
+ ],
+ "sarge.jump": [
+  {
+   "file": "sarge.jump.wav",
+   "ms": 385,
+   "peakDb": -14,
+   "src": "pak0/sound/player/sarge/jump1.wav"
+  }
+ ],
+ "sarge.pain25": [
+  {
+   "file": "sarge.pain25.wav",
+   "ms": 719,
+   "peakDb": -7.3,
+   "src": "pak0/sound/player/sarge/pain25_1.wav"
+  }
+ ],
+ "sarge.pain50": [
+  {
+   "file": "sarge.pain50.wav",
+   "ms": 441,
+   "peakDb": -7,
+   "src": "pak0/sound/player/sarge/pain50_1.wav"
+  }
+ ],
+ "sarge.pain75": [
+  {
+   "file": "sarge.pain75.wav",
+   "ms": 939,
+   "peakDb": -9.9,
+   "src": "pak0/sound/player/sarge/pain75_1.wav"
+  }
+ ],
+ "sarge.pain100": [
+  {
+   "file": "sarge.pain100.wav",
+   "ms": 388,
+   "peakDb": -8.3,
+   "src": "pak0/sound/player/sarge/pain100_1.wav"
+  }
+ ],
+ "sarge.death": [
+  {
+   "file": "sarge.death_1.wav",
+   "ms": 847,
+   "peakDb": -5.8,
+   "src": "pak0/sound/player/sarge/death1.wav"
+  },
+  {
+   "file": "sarge.death_2.wav",
+   "ms": 1130,
+   "peakDb": -4.4,
+   "src": "pak0/sound/player/sarge/death2.wav"
+  },
+  {
+   "file": "sarge.death_3.wav",
+   "ms": 979,
+   "peakDb": -0.2,
+   "src": "pak0/sound/player/sarge/death3.wav"
+  }
+ ],
+ "sarge.fall": [
+  {
+   "file": "sarge.fall.wav",
+   "ms": 435,
+   "peakDb": -11.4,
+   "src": "pak0/sound/player/sarge/fall1.wav"
+  }
+ ],
+ "sarge.taunt": [
+  {
+   "file": "sarge.taunt.wav",
+   "ms": 2500,
+   "peakDb": -0.3,
+   "src": "pak0/sound/player/sarge/taunt.wav"
+  }
+ ],
+ "visor.jump": [
+  {
+   "file": "visor.jump.wav",
+   "ms": 420,
+   "peakDb": -13.5,
+   "src": "pak2-players/sound/player/smarine/jump1.wav"
+  }
+ ],
+ "visor.pain25": [
+  {
+   "file": "visor.pain25.wav",
+   "ms": 700,
+   "peakDb": -6.8,
+   "src": "pak2-players/sound/player/smarine/pain25_1.wav"
+  }
+ ],
+ "visor.pain50": [
+  {
+   "file": "visor.pain50.wav",
+   "ms": 420,
+   "peakDb": -6.7,
+   "src": "pak2-players/sound/player/smarine/pain50_1.wav"
+  }
+ ],
+ "visor.pain75": [
+  {
+   "file": "visor.pain75.wav",
+   "ms": 910,
+   "peakDb": -9.5,
+   "src": "pak2-players/sound/player/smarine/pain75_1.wav"
+  }
+ ],
+ "visor.pain100": [
+  {
+   "file": "visor.pain100.wav",
+   "ms": 420,
+   "peakDb": -8.7,
+   "src": "pak2-players/sound/player/smarine/pain100_1.wav"
+  }
+ ],
+ "visor.death": [
+  {
+   "file": "visor.death_1.wav",
+   "ms": 840,
+   "peakDb": -5.7,
+   "src": "pak2-players/sound/player/smarine/death1.wav"
+  },
+  {
+   "file": "visor.death_2.wav",
+   "ms": 1120,
+   "peakDb": -4.3,
+   "src": "pak2-players/sound/player/smarine/death2.wav"
+  },
+  {
+   "file": "visor.death_3.wav",
+   "ms": 959,
+   "peakDb": 0,
+   "src": "pak2-players/sound/player/smarine/death3.wav"
+  }
+ ],
+ "visor.fall": [
+  {
+   "file": "visor.fall.wav",
+   "ms": 420,
+   "peakDb": -9.3,
+   "src": "pak2-players/sound/player/smarine/fall1.wav"
+  }
+ ],
+ "visor.taunt": [
+  {
+   "file": "visor.taunt.wav",
+   "ms": 2521,
+   "peakDb": -3.5,
+   "src": "pak2-players/sound/player/smarine/taunt.wav"
+  }
+ ],
+ "anarki.jump": [
+  {
+   "file": "anarki.jump.wav",
+   "ms": 143,
+   "peakDb": -7.6,
+   "src": "pak2-players/sound/player/tony/jump1.wav"
+  }
+ ],
+ "anarki.pain25": [
+  {
+   "file": "anarki.pain25.wav",
+   "ms": 583,
+   "peakDb": -0.3,
+   "src": "pak2-players/sound/player/tony/pain25_1.wav"
+  }
+ ],
+ "anarki.pain50": [
+  {
+   "file": "anarki.pain50.wav",
+   "ms": 293,
+   "peakDb": -0.2,
+   "src": "pak2-players/sound/player/tony/pain50_1.wav"
+  }
+ ],
+ "anarki.pain75": [
+  {
+   "file": "anarki.pain75.wav",
+   "ms": 295,
+   "peakDb": -0.1,
+   "src": "pak2-players/sound/player/tony/pain75_1.wav"
+  }
+ ],
+ "anarki.pain100": [
+  {
+   "file": "anarki.pain100.wav",
+   "ms": 172,
+   "peakDb": 0,
+   "src": "pak2-players/sound/player/tony/pain100_1.wav"
+  }
+ ],
+ "anarki.death": [
+  {
+   "file": "anarki.death_1.wav",
+   "ms": 753,
+   "peakDb": -0.9,
+   "src": "pak2-players/sound/player/tony/death1.wav"
+  },
+  {
+   "file": "anarki.death_2.wav",
+   "ms": 1231,
+   "peakDb": 0,
+   "src": "pak2-players/sound/player/tony/death2.wav"
+  },
+  {
+   "file": "anarki.death_3.wav",
+   "ms": 624,
+   "peakDb": 0,
+   "src": "pak2-players/sound/player/tony/death3.wav"
+  }
+ ],
+ "anarki.fall": [
+  {
+   "file": "anarki.fall.wav",
+   "ms": 334,
+   "peakDb": 0,
+   "src": "pak2-players/sound/player/tony/fall1.wav"
+  }
+ ],
+ "anarki.taunt": [
+  {
+   "file": "anarki.taunt.wav",
+   "ms": 1017,
+   "peakDb": -0.2,
+   "src": "pak2-players/sound/player/tony/taunt.wav"
+  }
+ ]
+}

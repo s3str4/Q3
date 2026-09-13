@@ -1,0 +1,19 @@
+Sounds in this directory and in ../voice/ come from OpenArena 0.8.8 (https://openarena.ws), licensed under the GNU GPL v2 (see COPYING). Converted to 22050 Hz mono 16-bit by tools/sfx_build.mjs, levels unchanged.
+
+--- sound/weapons/credits (pak0) ---
+
+
+--- sound/world/CREDITS (pak0) ---
+
+
+--- sound/player/sarge/credit (pak0) ---
+RottKing
+
+--- sound/player/smarine/credit (pak2-players) ---
+RottKing
+
+--- sound/player/tony/credit (pak2-players) ---
+RottKing
+
+--- sound/feedback/credits.txt (pak6-misc) ---
+Fuzztooth (mancubus.net) is the announcer!

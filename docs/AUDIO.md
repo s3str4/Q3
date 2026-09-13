@@ -175,6 +175,18 @@ grate, mid-air -> plate, no world -> plate, a remote hard LAND with an origin ->
 | Win / lose / overtime | rising C-E-G-C triangle arpeggio + chord / falling G-F-Eb-C detuned; overtime alert: two 520 Hz squares | |
 | Ambient | lowpass 160 Hz noise + 48 Hz drone with 0.08 Hz LFO, **-40.1 dBFS RMS** | bed only |
 
+## Recorded samples (OpenArena pack)
+
+`client/audio/sfx/manifest.json` maps cue keys to one or more WAVs (random take). `AudioEngine.loadSamples()` decodes
+them once; every cue method first calls `sfx(key, bus, origin, local, { gain, rate, delay })` (one-shot) or
+`sfxLoop(key, ...)` (rocket flight, lightning beam, gauntlet spin: looped buffer with fade in / out) and only falls
+back to its synthesized recipe when the key is missing (`samplesEnabled = false` forces the synthesized set, which is
+what the measurement tool renders). Samples go through the same `voice()` path (HRTF panner, compensation, buses,
+limiter) at `SFX_GAIN[bus]` (0.55-0.62) times `LOCAL_SFX_GAIN` (0.85) for own cues; the files keep OpenArena's levels.
+Body samples are per skin (`sarge.pain50`, `anarki.death`...), chosen by `skinFor(id)` from the player's skin or,
+for bots, their name. Landings play `land` (hard: full level plus the model's `fall` grunt; soft: -5 dB), gibs play
+`gib` plus a delayed `gibImpact`. The hit sound replaces the CPMA tones when the pack is loaded.
+
 ## Announcer (voice pack)
 
 `client/audio/voice/*.wav` + `manifest.json`, built by `tools/voice_build.mjs` (see the README section "Announcer and

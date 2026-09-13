@@ -1,107 +1,102 @@
 {
- "welcome": {
-  "file": "welcome.wav",
-  "text": "Welcome to the arena.",
-  "ms": 1511
- },
  "prepare": {
   "file": "prepare.wav",
-  "text": "Prepare to fight.",
-  "ms": 1399
+  "ms": 1876,
+  "src": "pak6-misc/sound/feedback/prepare.wav"
  },
  "three": {
   "file": "three.wav",
-  "text": "Three.",
-  "ms": 939
+  "ms": 1089,
+  "src": "pak6-misc/sound/feedback/three.wav"
  },
  "two": {
   "file": "two.wav",
-  "text": "Two.",
-  "ms": 875
+  "ms": 1022,
+  "src": "pak6-misc/sound/feedback/two.wav"
  },
  "one": {
   "file": "one.wav",
-  "text": "One.",
-  "ms": 1009
+  "ms": 1188,
+  "src": "pak6-misc/sound/feedback/one.wav"
  },
  "fight": {
   "file": "fight.wav",
-  "text": "Fight!",
-  "ms": 1000
+  "ms": 1123,
+  "src": "pak6-misc/sound/feedback/fight.wav"
  },
  "excellent": {
   "file": "excellent.wav",
-  "text": "Excellent!",
-  "ms": 1155
+  "ms": 892,
+  "src": "pak6-misc/sound/feedback/excellent.wav"
  },
  "impressive": {
   "file": "impressive.wav",
-  "text": "Impressive!",
-  "ms": 1328
+  "ms": 1275,
+  "src": "pak6-misc/sound/feedback/impressive.wav"
  },
  "humiliation": {
   "file": "humiliation.wav",
-  "text": "Humiliation!",
-  "ms": 1535
+  "ms": 1645,
+  "src": "pak6-misc/sound/feedback/humiliation.wav"
  },
  "perfect": {
   "file": "perfect.wav",
-  "text": "Perfect!",
-  "ms": 1202
+  "ms": 1125,
+  "src": "pak6-misc/sound/feedback/perfect.wav"
  },
  "taken_lead": {
   "file": "taken_lead.wav",
-  "text": "You have taken the lead.",
-  "ms": 1552
+  "ms": 2097,
+  "src": "pak6-misc/sound/feedback/takenlead.wav"
  },
  "lost_lead": {
   "file": "lost_lead.wav",
-  "text": "You have lost the lead.",
-  "ms": 1531
+  "ms": 2127,
+  "src": "pak6-misc/sound/feedback/lostlead.wav"
  },
  "tied_lead": {
   "file": "tied_lead.wav",
-  "text": "Tied for the lead.",
-  "ms": 1341
+  "ms": 2120,
+  "src": "pak6-misc/sound/feedback/tiedlead.wav"
  },
  "one_minute": {
   "file": "one_minute.wav",
-  "text": "One minute warning.",
-  "ms": 1473
+  "ms": 1567,
+  "src": "pak6-misc/sound/feedback/1_minute.wav"
  },
  "five_minute": {
   "file": "five_minute.wav",
-  "text": "Five minute warning.",
-  "ms": 1540
+  "ms": 1531,
+  "src": "pak6-misc/sound/feedback/5_minute.wav"
  },
  "one_frag": {
   "file": "one_frag.wav",
-  "text": "One frag left.",
-  "ms": 1409
+  "ms": 2046,
+  "src": "pak6-misc/sound/feedback/1_frag.wav"
  },
  "two_frags": {
   "file": "two_frags.wav",
-  "text": "Two frags left.",
-  "ms": 1489
+  "ms": 1634,
+  "src": "pak6-misc/sound/feedback/2_frags.wav"
  },
  "three_frags": {
   "file": "three_frags.wav",
-  "text": "Three frags left.",
-  "ms": 1494
+  "ms": 1872,
+  "src": "pak6-misc/sound/feedback/3_frags.wav"
  },
  "sudden_death": {
   "file": "sudden_death.wav",
-  "text": "Sudden death.",
-  "ms": 1245
+  "ms": 1584,
+  "src": "pak6-misc/sound/feedback/sudden_death.wav"
  },
  "you_win": {
   "file": "you_win.wav",
-  "text": "You win.",
-  "ms": 1012
+  "ms": 1812,
+  "src": "pak6-misc/sound/feedback/voc_youwin.wav"
  },
  "you_lose": {
   "file": "you_lose.wav",
-  "text": "You lose.",
-  "ms": 1146
+  "ms": 1967,
+  "src": "pak6-misc/sound/feedback/voc_youlose.wav"
  }
 }

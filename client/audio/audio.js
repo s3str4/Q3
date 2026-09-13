@@ -90,6 +90,12 @@ const T = CUE_TRIM;
 export const ANNOUNCER_GAIN = 0.5;
 export const ANNOUNCER_GAP = 0.12;            // s of silence between queued lines
 export const ANNOUNCER_INTERRUPT = new Set(['three', 'two', 'one', 'fight']);   // time-critical: cut whatever is playing
+// ---------- recorded samples (OpenArena pack, client/audio/sfx/, built by tools/sfx_build.mjs) ----------
+// The pack is mastered as a whole (a rocket vs a footstep is the recordings' own balance), so one gain per bus is applied
+// on top of the same spatialization / attenuation as the synthesized cues. Local cues get LOCAL_SFX_GAIN so your own
+// gun does not drown the enemy's.
+export const SFX_GAIN = { weapons: 0.62, impacts: 0.62, player: 0.6, enemy: 0.6, items: 0.55, ui: 0.6 };
+export const LOCAL_SFX_GAIN = 0.85;
 // Body cues (jump grunt, pain, death) are pitched per skin so the two players do not sound like the same throat.
 export const SKIN_VOICE_PITCH = { sarge: 0.88, visor: 1.0, anarki: 1.14 };
 // Events voiced at the emitting player's position (as opposed to at e.origin of a world point): dropped for a remote player
@@ -110,6 +116,8 @@ export class AudioEngine {
     this.pendingHits = new Map(); this.pendingPain = new Map();   // per-tick damage coalescing (see COALESCE_WINDOW)
     this.painDebounce = new Map();  // target id -> { t: time of the last voiced grunt, health: lowest health seen since (pending tier escalation) }
     this.voiceBufs = new Map(); this.voiceLoad = null; this.announcerEnabled = true;   // announcer clips (name -> AudioBuffer), see loadVoices()
+    this.samples = new Map(); this.sampleLoad = null; this.samplesEnabled = true;     // recorded cues (key -> [AudioBuffer]), see loadSamples()
+    this.bodySkin = 'sarge';                                                            // skin of the player behind the current body event (per-skin voice samples)
     this.announceQueue = []; this.announcing = null;                                     // { name, src, v, endAt } while a line plays
     this.bodyPitch = 1;                                                                  // per-skin multiplier applied by grunt() (set per event)
     const seed = this.opts.seed;
@@ -283,6 +291,8 @@ export class AudioEngine {
 
   // ---------- weapons ----------
   fire(w, origin, local) {
+    const key = { [WEAPONS.ROCKET]: 'rocketFire', [WEAPONS.RAIL]: 'railFire', [WEAPONS.SHOTGUN]: 'shotgunFire', [WEAPONS.PLASMA]: 'plasmaFire', [WEAPONS.MACHINEGUN]: 'machinegunFire', [WEAPONS.GAUNTLET]: 'gauntletFire' }[w];
+    if (key && w !== WEAPONS.LIGHTNING) { const v = this.sfx(key, 'weapons', origin, local); if (v) return v; }
     switch (w) {
       case WEAPONS.ROCKET: return this.rocketFire(origin, local);
       case WEAPONS.RAIL: return this.railFire(origin, local);
@@ -366,6 +376,10 @@ export class AudioEngine {
     const ctx = this.ctx, t = this.now();
     let l = this.lgLoops.get(id);
     if (!l) {
+      const sl = this.sfxLoop('lightningLoop', 'weapons', origin, local);
+      if (sl) { l = { v: sl.v, last: t, stop: sl.stop }; this.lgLoops.set(id, l); }
+    }
+    if (!l) {
       const v = this.voice('weapons', origin, { local, gain: T.lightningLoop, loop: true });
       const g = ctx.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(1, t + 0.02); g.connect(this.drive(v, 2)); // saturated: buzz crest ~9 dB like the other fires
       const o1 = ctx.createOscillator(); o1.type = 'sawtooth'; o1.frequency.value = 62;
@@ -389,6 +403,8 @@ export class AudioEngine {
   // Rocket in flight: rumbling hiss loop following the projectile, pitch-shifted by radial velocity (doppler).
   rocketLoopStart(id, origin, velocity) {
     const ctx = this.ctx, t = this.now();
+    const sl = this.sfxLoop('rocketLoop', 'weapons', origin, false, { fadeIn: 0.06 });
+    if (sl) { const loop = { v: sl.v, src: sl.src, velocity: velocity || [0, 0, 0], stop: sl.stop, sample: true }; this.rocketLoops.set(id, loop); return loop; }
     const v = this.voice('weapons', origin, { gain: T.rocketLoop, loop: true });
     const g = ctx.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(1, t + 0.06); g.connect(v.in);
     const n = ctx.createBufferSource(); n.buffer = this.noiseBuf; n.loop = true; const f = ctx.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 420; f.Q.value = 0.9;
@@ -410,7 +426,7 @@ export class AudioEngine {
   }
 
   // ---------- impacts ----------
-  explode(w, origin) { return w === WEAPONS.ROCKET ? this.rocketExplode(origin) : this.plasmaExplode(origin); }
+  explode(w, origin) { return this.sfx(w === WEAPONS.ROCKET ? 'rocketExplode' : 'plasmaExplode', 'impacts', origin, false) || (w === WEAPONS.ROCKET ? this.rocketExplode(origin) : this.plasmaExplode(origin)); }
   // Rocket explosion: saturated sub impact, crack, mid body sweep, debris crackle, long low tail.
   rocketExplode(origin) {
     const v = this.voice('impacts', origin, { gain: T.rocketExplode }); const t = this.now(); const d = this.drive(v, 3);
@@ -429,6 +445,7 @@ export class AudioEngine {
     return v;
   }
   impact(w, origin) {
+    const v = this.sfx(w === WEAPONS.RAIL ? 'railImpact' : w === WEAPONS.GAUNTLET ? 'gauntletImpact' : 'bulletImpact', 'impacts', origin, false); if (v) return v;
     if (w === WEAPONS.RAIL) return this.railImpact(origin);
     if (w === WEAPONS.GAUNTLET) return this.gauntletImpact(origin);
     return this.bulletImpact(origin);
@@ -454,6 +471,7 @@ export class AudioEngine {
   }
   // Lightning hit sizzle: bright noise + downward chirp.
   lgHit(origin) {
+    { const v = this.sfx('lgHit', 'impacts', origin, false); if (v) return v; }
     const v = this.voice('impacts', origin, { gain: T.lgHit }); const t = this.now();
     this.noise(v, t, t + 0.06, { type: 'bandpass', freq: 4500, q: 1, peak: 1, attack: 0.001 });
     this.osc(v, 'square', 3200, t, t + 0.04, { f1: 1400, peak: 0.25, attack: 0.001 });
@@ -462,12 +480,14 @@ export class AudioEngine {
 
   // ---------- player body cues ----------
   bodyBus(local) { return local ? 'player' : 'enemy'; }
+  skinFor(id, cg) { const p = cg && cg.game && cg.game.players && cg.game.players.get(id); if (!p) return 'sarge'; return p.skin || Object.keys(SKIN_VOICE_PITCH).find((k) => String(p.name || '').toLowerCase().includes(k)) || 'sarge'; }
   pitchFor(id, cg) { // bots carry no skin field: their name is their skin (Sarge / Visor / Anarki), like the renderer does
     const p = cg && cg.game && cg.game.players && cg.game.players.get(id); if (!p) return 1;
     const skin = p.skin || Object.keys(SKIN_VOICE_PITCH).find((k) => String(p.name || '').toLowerCase().includes(k));
     return SKIN_VOICE_PITCH[skin] || 1;
   }
   jump(origin, local) {
+    { const v = this.sfx(`${this.bodySkin}.jump`, this.bodyBus(local), origin, local); if (v) return v; }
     const v = this.voice(this.bodyBus(local), origin, { local, gain: T.jump }); const t = this.now();
     this.grunt(v, t, t + 0.14, { f0: 200, f1: 150, formants: [650, 1150, 2500], formantsEnd: [500, 900, 2300], peak: 1, attack: 0.012, breath: 0.25 });
     this.noise(v, t, t + 0.05, { type: 'bandpass', freq: 1100, q: 1, peak: 0.25, attack: 0.002 });
@@ -476,6 +496,7 @@ export class AudioEngine {
   // Landing: the body thud (the player's mass, the same on every floor) under a surface layer: plate clank partials, grating
   // ring + rattle, stone grit + debris, or a muffled slap on trims / pads. `surface` is one of SURFACES (see surfaceAt()).
   land(origin, local, hard, surface = 'plate') {
+    if (this.hasSample('land')) { const v = this.sfx('land', this.bodyBus(local), origin, local, { gain: hard ? 1 : 0.55 }); if (hard) this.sfx(`${this.bodySkin}.fall`, this.bodyBus(local), origin, local, { gain: 0.7 }); return v; }
     const key = (hard ? 'landHard' : 'landSoft') + (surface === 'plate' ? '' : surface[0].toUpperCase() + surface.slice(1));
     const v = this.voice(this.bodyBus(local), origin, { local, gain: T[key] ?? (hard ? T.landHard : T.landSoft) }); const t = this.now(); const d = this.drive(v, 2);
     this.noise(v, t, t + (hard ? 0.16 : 0.07), { type: 'lowpass', freq: hard ? 700 : 900, freqEnd: 90, peak: 1, attack: 0.002, dest: d });
@@ -504,6 +525,7 @@ export class AudioEngine {
   // trim = muffled tap with little high end (a 2.8 kHz tick remains so it can still be located). All four calibrated to the
   // same peak (CUE_TRIM) so an enemy step is equally audible on every floor.
   footstep(origin, local, surface = 'plate') {
+    { const v = this.sfx('footstep' + surface[0].toUpperCase() + surface.slice(1), this.bodyBus(local), origin, local, { gain: local ? 0.7 : 1 }); if (v) return v; }
     const key = surface === 'plate' ? 'footstep' : 'footstep' + surface[0].toUpperCase() + surface.slice(1);
     const v = this.voice(this.bodyBus(local), origin, { local, gain: T[key] ?? T.footstep }); const t = this.now(); const r = this.rand();
     if (surface === 'grate') {
@@ -545,6 +567,7 @@ export class AudioEngine {
   // lower, longer and shakier as health drops. `id` is the grunting player (unused here; read by the live audit's instrumentation).
   pain(origin, local, health, id) {
     const tier = health < 25 ? 3 : health < 50 ? 2 : health < 75 ? 1 : 0;
+    { const v = this.sfx(`${this.bodySkin}.pain${[100, 75, 50, 25][tier]}`, this.bodyBus(local), origin, local); if (v) return v; }
     const v = this.voice(this.bodyBus(local), origin, { local, gain: [T.painLight, T.painMid, T.painHeavy, T.painCritical][tier] }); const t = this.now();
     if (tier === 0) this.grunt(v, t, t + 0.18, { f0: 250, f1: 190, formants: [700, 1200, 2600], formantsEnd: [550, 950, 2300], peak: 1, attack: 0.01, breath: 0.25 });
     else if (tier === 1) this.grunt(v, t, t + 0.26, { f0: 228, f1: 165, formants: [680, 1150, 2550], formantsEnd: [500, 900, 2250], peak: 1, attack: 0.012, breath: 0.28 });
@@ -553,6 +576,7 @@ export class AudioEngine {
     return v;
   }
   death(origin, local, gib) {
+    if (this.hasSample(`${this.bodySkin}.death`)) { if (gib) { const v = this.sfx('gib', this.bodyBus(local), origin, local); this.sfx('gibImpact', 'impacts', origin, false, { delay: 0.25 + this.rand() * 0.2, gain: 0.6 }); return v; } return this.sfx(`${this.bodySkin}.death`, this.bodyBus(local), origin, local); }
     const v = this.voice(this.bodyBus(local), origin, { local, gain: gib ? T.gib : T.death }); const t = this.now();
     if (gib) {
       // wet splat: bubbling lowpass noise with fast amplitude wobble + meaty pops
@@ -571,6 +595,11 @@ export class AudioEngine {
 
   // ---------- items ----------
   pickup(itemType, origin, local) {
+    if (this.hasSample('pickupHealth')) {
+      const key = itemType === 'mega' ? 'pickupMega' : itemType === 'health5' ? 'pickupHealthSmall' : itemType === 'health50' ? 'pickupHealthLarge' : /^health/.test(itemType) ? 'pickupHealth'
+        : itemType === 'armorShard' ? 'pickupShard' : /^armor/.test(itemType) ? 'pickupArmor' : /^weapon/.test(itemType) ? 'pickupWeapon' : /^ammo/.test(itemType) ? 'pickupAmmo' : null;
+      const v = key && this.sfx(key, 'items', origin, local); if (v) return v;
+    }
     const def = ITEMS[itemType] || { kind: 'ammo' };
     if (def.kind === 'health') return itemType === 'mega' ? this.pickupMega(origin, local) : this.pickupHealth(origin, local);
     if (def.kind === 'armor') return this.pickupArmor(origin, local, itemType);
@@ -613,6 +642,7 @@ export class AudioEngine {
   // Item respawn. Majors (mega, RA, RL/RG/LG) get a long blooming sweep with a category tint and a wide reference distance so
   // the whole map hears them; minors are a short local pip.
   itemRespawn(itemType, origin) {
+    if (this.hasSample('itemRespawn')) { const major = /^(mega|armorRed|armorYellow|weapon)/.test(itemType); return this.sfx('itemRespawn', 'items', major ? null : origin, major, { gain: major ? 0.8 : 0.6 }); }
     const def = ITEMS[itemType] || {};
     if (!def.major) return this.respawnMinor(origin);
     return this.respawnMajor(origin, def.kind);
@@ -632,6 +662,7 @@ export class AudioEngine {
     return v;
   }
   jumppad(origin, local) {
+    { const v = this.sfx('jumppad', 'items', origin, local); if (v) return v; }
     const v = this.voice(this.bodyBus(local), origin, { local, gain: T.jumppad }); const t = this.now();
     this.osc(v, 'sawtooth', 90, t, t + 0.35, { f1: 650, peak: 0.6, attack: 0.01, sweep: 0.3 });
     this.noise(v, t, t + 0.3, { type: 'bandpass', freq: 600, freqEnd: 3000, q: 1, peak: 0.6, attack: 0.01 });
@@ -639,6 +670,7 @@ export class AudioEngine {
     return v;
   }
   teleport(origin, local) {
+    { const v = this.sfx('teleportIn', 'items', origin, local); if (v) return v; }
     const v = this.voice(this.bodyBus(local), origin, { local, gain: T.teleport }); const t = this.now();
     for (let i = 0; i < 6; i++) this.osc(v, 'sine', 300 + i * 260, t + i * 0.035, t + 0.5, { peak: 0.3, attack: 0.01, detune: (i % 2 ? 7 : -7) });
     this.noise(v, t, t + 0.5, { type: 'bandpass', freq: 3000, freqEnd: 300, q: 2, peak: 0.5, attack: 0.02 });
@@ -648,17 +680,20 @@ export class AudioEngine {
   // ---------- UI (non-spatial, always at full level) ----------
   // CPMA-style hit tones: four tiers by damage dealt, pitch rises with damage.
   hitTone(damage) {
+    { const v = this.sfx('hit', 'ui', null, true, { gain: 0.9 }); if (v) return v; }
     const tier = damage >= 75 ? 3 : damage >= 50 ? 2 : damage >= 25 ? 1 : 0;
     const v = this.voice('ui', null, { gain: T.hitTone }); const t = this.now(); const f = [620, 800, 1000, 1300][tier];
     this.osc(v, 'square', f, t, t + 0.06, { peak: 0.5, attack: 0.001 }); this.osc(v, 'sine', f * 2, t, t + 0.05, { peak: 0.3, attack: 0.001 });
     return v;
   }
   weaponChange() {
+    { const v = this.sfx('weaponChange', 'ui', null, true); if (v) return v; }
     const v = this.voice('ui', null, { gain: T.weaponChange }); const t = this.now();
     this.noise(v, t, t + 0.015, { type: 'bandpass', freq: 2500, q: 2, peak: 0.8, attack: 0.001 }); this.osc(v, 'sine', 160, t + 0.03, t + 0.07, { peak: 0.5, attack: 0.002 });
     return v;
   }
   noAmmo() {
+    { const v = this.sfx('noAmmo', 'ui', null, true); if (v) return v; }
     const v = this.voice('ui', null, { gain: T.noAmmo }); const t = this.now();
     for (const dt of [0, 0.09]) this.osc(v, 'square', 330, t + dt, t + dt + 0.02, { peak: 0.5, attack: 0.001 });
     return v;
@@ -697,6 +732,40 @@ export class AudioEngine {
     for (const s of [n, o, lfo]) { s.start(t); this.track(v, s, Infinity); }
     this.ambientVoice = { v, stop: () => { const t2 = this.now(); v.in.gain.setTargetAtTime(0, t2, 0.05); for (const s of [n, o, lfo]) s.stop(t2 + 0.3); v.loop = false; v.end = t2 + 0.3; } };
     return v;
+  }
+
+  // ---------- recorded samples ----------
+  loadSamples(base = new URL('./sfx/', import.meta.url)) {
+    if (this.sampleLoad) return this.sampleLoad;
+    this.sampleLoad = (async () => {
+      const man = await (await fetch(new URL('manifest.json', base))).json();
+      await Promise.all(Object.entries(man).map(async ([key, files]) => {
+        const bufs = [];
+        for (const m of files) { try { const ab = await (await fetch(new URL(m.file, base))).arrayBuffer(); bufs.push(await this.ctx.decodeAudioData(ab)); } catch (err) { console.warn('[audio] sample failed', key, m.file, err); } }
+        if (bufs.length) this.samples.set(key, bufs);
+      }));
+      return this.samples.size;
+    })();
+    return this.sampleLoad;
+  }
+  hasSample(key) { return this.samplesEnabled && this.samples.has(key); }
+  pickSample(key) { const b = this.samples.get(key); return b ? b[b.length === 1 ? 0 : Math.floor(this.rand() * b.length)] : null; }
+  // One-shot sample on `bus` at `origin` (spatial unless local). Returns the voice, or null when the pack has no such cue
+  // (the caller then plays its synthesized recipe). `o.gain` multiplies the bus level, `o.rate` the playback rate.
+  sfx(key, bus, origin, local, o = {}) {
+    const buf = this.hasSample(key) ? this.pickSample(key) : null; if (!buf) return null;
+    const v = this.voice(bus, origin, { local, gain: (SFX_GAIN[bus] ?? 0.6) * (o.gain ?? 1) * (local ? LOCAL_SFX_GAIN : 1) }); const t = this.now() + (o.delay || 0);
+    const src = this.ctx.createBufferSource(); src.buffer = buf; if (o.rate) src.playbackRate.value = o.rate; src.connect(v.in); src.start(t); this.track(v, src, t + buf.duration / (o.rate || 1));
+    return v;
+  }
+  // Looping sample (rocket flight, lightning beam, gauntlet spin): returns { v, src, gain, stop() } with a short fade on stop.
+  sfxLoop(key, bus, origin, local, o = {}) {
+    const buf = this.hasSample(key) ? this.pickSample(key) : null; if (!buf) return null;
+    const ctx = this.ctx, t = this.now();
+    const v = this.voice(bus, origin, { local, gain: (SFX_GAIN[bus] ?? 0.6) * (o.gain ?? 1) * (local ? LOCAL_SFX_GAIN : 1), loop: true });
+    const g = ctx.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(1, t + (o.fadeIn ?? 0.02)); g.connect(v.in);
+    const src = ctx.createBufferSource(); src.buffer = buf; src.loop = true; src.connect(g); src.start(t); this.track(v, src, Infinity);
+    return { v, src, gain: g, stop: () => { const t2 = this.now(); g.gain.cancelScheduledValues(t2); g.gain.setValueAtTime(g.gain.value, t2); g.gain.linearRampToValueAtTime(0, t2 + (o.fadeOut ?? 0.05)); try { src.stop(t2 + (o.fadeOut ?? 0.05) + 0.01); } catch { /* stopped */ } v.loop = false; v.end = t2 + 0.1; } };
   }
 
   // ---------- announcer (voice pack) ----------
@@ -789,6 +858,7 @@ export class AudioEngine {
     // you" on top of you). Otherwise remember where the player was for the next event that carries no origin.
     if (!local && e.id) { if (!origin) { if (BODY_EVENTS.has(e.type)) { this.counters.dropped++; return; } } else this.lastOrigin.set(e.id, origin); }
     this.bodyPitch = BODY_EVENTS.has(e.type) ? this.pitchFor(e.id, cg) : 1;
+    this.bodySkin = BODY_EVENTS.has(e.type) ? this.skinFor(e.id, cg) : 'sarge';
     switch (e.type) {
       case EV.FIRE: if (e.weapon === WEAPONS.LIGHTNING) this.lgStart(e.id, origin, local); else this.fire(e.weapon, origin, local); break;
       case EV.EXPLODE: this.explode(e.weapon, e.origin); break;
@@ -872,7 +942,7 @@ export class AudioEngine {
       if (pr.v) l.velocity = pr.v;
       if (l.v.panner) this.place(l.v, pr.origin);
       const dop = this.dopplerFactor(pr.origin, l.velocity);
-      l.n.playbackRate.setTargetAtTime(dop, t, 0.05); l.o.frequency.setTargetAtTime(58 * dop, t, 0.05);
+      if (l.sample) l.src.playbackRate.setTargetAtTime(dop, t, 0.05); else { l.n.playbackRate.setTargetAtTime(dop, t, 0.05); l.o.frequency.setTargetAtTime(58 * dop, t, 0.05); }
     }
     for (const [id, l] of this.rocketLoops) if (!live.has(id)) { l.stop(); this.rocketLoops.delete(id); }
   }
