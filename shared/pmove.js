@@ -1,5 +1,5 @@
 // Port of Quake 3 bg_pmove.c (walk/air/friction/step-slide/jump/duck) on a fixed 60 Hz step.
-import { PM, BUTTONS, FRAMETIME, EV } from './constants.js';
+import { PM, CPM, BUTTONS, FRAMETIME, EV } from './constants.js';
 import { angleVectors, dot, length, normalize, copy, cross } from './vec3.js';
 import { traceBox } from './trace.js';
 
@@ -25,10 +25,11 @@ export function clipVelocity(inv, normal, overbounce) {
 }
 
 // cmd: { forward: -127..127, right: -127..127, up: -127..127, buttons, angles:[p,y,r] }
-// ctx: { world, entities (other players for collision), skipId, events: [] (optional), frametime }
+// ctx: { world, entities (other players for collision), skipId, events: [] (optional), frametime,
+//        physics: 'vq3' (default) | 'cpm' (the match rule; the Game passes rules.physics) }
 export function pmove(ps, cmd, ctx) {
   const frametime = ctx.frametime ?? FRAMETIME;
-  const pml = { frametime, groundPlane: false, walking: false, groundTrace: null, previousOrigin: copy(ps.origin), previousVelocity: copy(ps.velocity) };
+  const pml = { frametime, groundPlane: false, walking: false, groundTrace: null, previousOrigin: copy(ps.origin), previousVelocity: copy(ps.velocity), cpm: ctx.physics === 'cpm' };
   const events = ctx.events || null;
   const trace = (start, end, mins, maxs) => traceBox(ctx.world, start, end, mins, maxs, ctx.entities, { skip: ctx.skipId, skipFlags: ctx.skipFlags || 0 });
   pml.trace = trace;
@@ -215,11 +216,34 @@ function airMove(ps, cmd, pml) {
   const f = normalize(fwd), r = normalize(rgt);
   const wishvel = [f[0] * fmove + r[0] * smove, f[1] * fmove + r[1] * smove, 0];
   const wishdir = normalize(wishvel);
-  const wishspeed = length(wishvel) * scale;
-  accelerate(ps, wishdir, wishspeed, PM.airaccelerate, pml.frametime);
+  let wishspeed = length(wishvel) * scale;
+  if (pml.cpm) {
+    // CPM air physics (CPMA / Warsow PM_AirMove): reversing direction is quicker (airstopaccelerate); a sideways-only
+    // strafe is a short strong push (wish speed capped at 30 with strafeaccelerate 70: the CPM A/D air strafe); a pure
+    // forward/back input steers the velocity toward the view (PM_Aircontrol); a diagonal strafe is plain vq3.
+    const wishspeed2 = wishspeed;
+    let accel = dot(ps.velocity, wishdir) < 0 ? CPM.airstopaccelerate : PM.airaccelerate;
+    if (fmove === 0 && smove !== 0) { if (wishspeed > CPM.airwishspeed) wishspeed = CPM.airwishspeed; accel = CPM.strafeaccelerate; }
+    accelerate(ps, wishdir, wishspeed, accel, pml.frametime);
+    if (smove === 0 && fmove !== 0) airControl(ps, wishdir, wishspeed2, pml.frametime);
+  } else accelerate(ps, wishdir, wishspeed, PM.airaccelerate, pml.frametime);
   // we may have a ground plane that is very steep, even though we don't have a groundentity
   if (pml.groundPlane) ps.velocity = clipVelocity(ps.velocity, pml.groundTrace.plane.n, PM.overclip);
   stepSlideMove(ps, pml, true, PM.mins, playerMaxs(ps));
+}
+
+// CPM_Aircontrol: with only forward/back held, rotate the horizontal velocity toward wishdir by
+// 32 * aircontrol * dot^2 * frametime (never while slowing down: dot <= 0), keeping the speed and the vertical velocity.
+function airControl(ps, wishdir, wishspeed, frametime) {
+  if (wishspeed === 0) return;
+  const zspeed = ps.velocity[2];
+  const horiz = [ps.velocity[0], ps.velocity[1], 0];
+  const speed = length(horiz);
+  let dir = normalize(horiz);
+  const d = dot(dir, wishdir);
+  const k = 32 * CPM.aircontrol * d * d * frametime;
+  if (d > 0) dir = normalize([dir[0] * speed + wishdir[0] * k, dir[1] * speed + wishdir[1] * k, 0]);
+  ps.velocity = [dir[0] * speed, dir[1] * speed, zspeed];
 }
 
 function walkMove(ps, cmd, pml, events) {

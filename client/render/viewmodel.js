@@ -5,9 +5,9 @@
 // drop/raise switch animation, muzzle flashes from a 4-variant sprite sheet, an LG core that glows while firing
 // and a rail coil that charges after a shot. Live parts use this instance's own materials (see weapons.js).
 import * as THREE from 'three';
-import { WEAPONS, WEAPON_DROP_TIME, WEAPON_RAISE_TIME } from '../../shared/constants.js';
+import { WEAPONS, WEAPON_DROP_TIME, WEAPON_RAISE_TIME, playerColorHex } from '../../shared/constants.js';
 import { makeWeaponMesh, weaponColor } from './weapons.js';
-import { skinMaterials, skinFor } from './playermodel.js';
+import { skinMaterials, skinFor, SKIN_NAMES } from './playermodel.js';
 import { getSheet } from './particles.js';
 
 const SCALE = 0.46;
@@ -46,13 +46,13 @@ export class ViewModel {
     this.current = 0; this.recoil = 0; this.slide = 0; this.climb = 0; this.sway = [0, 0]; this.lastYaw = 0; this.lastPitch = 0; this.flashUntil = 0; this.flashColor = 0xffffff; this.hidden = false;
     this.firingUntil = 0; this.lastFireAt = -1e9; this.lastFireWeapon = 0; this.railCharge = 0; this.bladeSpin = 0; this.bladeAngle = 0; this.pumpAt = -1e9;
     this.muzzle = new THREE.Object3D(); this.rig.add(this.muzzle);
-    this.armMats = skinMaterials('sarge', 0x4ab3ff); this.armSkin = 'sarge';
+    this.armMats = skinMaterials('sarge', 0x4ab3ff); this.armSkin = 'sarge'; this.armColor = 0x4ab3ff;
   }
-  // called with the local player's name so the arms wear the same skin as the third-person model
-  setSkin(name, id) {
-    const skin = skinFor(name, id);
-    if (skin === this.armSkin) return;
-    this.armSkin = skin; this.armMats = skinMaterials(skin, 0x4ab3ff);
+  // The arms wear the local player's skin and colour (the chosen ones from the snapshot, else the name-derived skin
+  // and the default blue), the same materials as the third-person model.
+  setSkin(skin, color) {
+    if (skin === this.armSkin && color === this.armColor) return;
+    this.armSkin = skin; this.armColor = color; this.armMats = skinMaterials(skin, color);
     for (const k in this.meshes) { this.rig.remove(this.meshes[k]); delete this.meshes[k]; }
   }
   ensure(w) {
@@ -126,7 +126,7 @@ export class ViewModel {
     for (const m of this.flashMats) m.opacity = 0;
     if (view.dead || this.hidden) { this.muzzleLight.intensity = 0; return; }
     const w = p.weapon;
-    if (p.name) this.setSkin(p.name, p.id);
+    if (p.name) this.setSkin(p.skin && SKIN_NAMES.includes(p.skin) ? p.skin : skinFor(p.name, p.id), playerColorHex(p.color, 0x4ab3ff));
     const holder = this.ensure(w);
     holder.visible = true;
     const model = holder.userData.model, live = model.userData.live;

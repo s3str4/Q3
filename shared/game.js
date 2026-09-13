@@ -1,7 +1,7 @@
 // Authoritative match simulation (shared by server, client prediction and bots).
 import {
   PM, WEAPONS, WEAPON_DEFS, WEAPON_ORDER, WEAPON_DROP_TIME, WEAPON_RAISE_TIME, SELF_DAMAGE_SCALE, ARMOR_PROTECTION,
-  HEALTH, ARMOR, ITEMS, ITEM_HALF, MATCH, BUTTONS, TICK_MS, FRAMETIME, EV, LAG_COMP_MAX_MS, HISTORY_TICKS,
+  HEALTH, ARMOR, ITEMS, ITEM_HALF, MATCH, BUTTONS, TICK_MS, FRAMETIME, EV, LAG_COMP_MAX_MS, HISTORY_TICKS, PHYSICS, PLAYER_SKINS, PLAYER_COLORS,
 } from './constants.js';
 import { pmove, newPlayerState, PMF } from './pmove.js';
 import { traceBox } from './trace.js';
@@ -20,6 +20,7 @@ export class Game {
     this.world = { brushes: map.brushes };
     this.mode = opts.mode || 'duel';
     this.rules = { ...MATCH[this.mode], ...(opts.rules || {}) };
+    if (!PHYSICS.includes(this.rules.physics)) this.rules.physics = 'vq3'; // movement rule set, read by pmove through the ctx
     this.seed = opts.seed ?? 1337;
     this.rng = makeRng(this.seed);
     this.isServer = opts.isServer !== false;
@@ -39,9 +40,11 @@ export class Game {
   setHold(on) { this.match.hold = !!on; }
 
   // ---------- players ----------
+  // opts: isBot; skin (one of PLAYER_SKINS) and color (index into PLAYER_COLORS) chosen by the player, null = default
   addPlayer(id, name, opts = {}) {
     const p = {
       id, name: name || `player${id}`, ps: newPlayerState(), health: 0, armor: 0, dead: true, deathTime: -1e9, spawnTime: 0,
+      skin: PLAYER_SKINS.includes(opts.skin) ? opts.skin : null, color: Number.isInteger(opts.color) && PLAYER_COLORS[opts.color] ? opts.color : null,
       weapon: WEAPONS.MACHINEGUN, pendingWeapon: 0, weaponState: 'ready', weaponTime: 0, ammo: {}, weapons: 0,
       frags: 0, deaths: 0, damageDealt: 0, damageTaken: 0, hits: 0, shots: 0, lastCmdSeq: 0, cmdQueue: [], lastCmd: null, idleTicks: 0,
       attackHeld: false, history: [], mins: PM.mins, maxs: PM.maxs, origin: [0, 0, 0], isBot: !!opts.isBot, ready: false,
@@ -176,7 +179,7 @@ export class Game {
       return events;
     }
     p.ps.dead = false;
-    pmove(p.ps, moveCmd, { world: this.world, entities, skipId: p.id, events, skipFlags: 0 });
+    pmove(p.ps, moveCmd, { world: this.world, entities, skipId: p.id, events, skipFlags: 0, physics: this.rules.physics });
     p.origin = p.ps.origin;
     p.mins = PM.mins; p.maxs = (p.ps.pmFlags & PMF.DUCKED) ? PM.duckMaxs : PM.maxs;
     this.touchTriggers(p, events, predict);
@@ -661,12 +664,14 @@ export class Game {
   snapshot(forId = null) {
     const players = [];
     for (const p of this.players.values()) {
-      players.push({
+      const sp = {
         id: p.id, n: p.name, o: p.ps.origin, v: p.ps.velocity, a: [p.ps.viewangles[0], p.ps.viewangles[1]], h: p.health, ar: p.armor, w: p.weapon, pw: p.pendingWeapon,
         ws: p.weaponState, wt: p.weaponTime, d: p.dead ? 1 : 0, f: p.frags, dt: p.deaths, pf: p.ps.pmFlags, pt: p.ps.pmTime, g: p.ps.groundEntity ? 1 : 0,
         vh: p.ps.viewHeight, wp: p.weapons, am: p.ammo, ack: p.lastCmdSeq, ah: p.attackHeld ? 1 : 0, bot: p.isBot ? 1 : 0, ping: p.ping, ts: p.teleportSeq || 0,
         dd: p.damageDealt, hits: p.hits, shots: p.shots, jt: p.ps.jumpPadTime, jp: p.ps.padIndex ?? -1, hd: p.healthDecayAt, dth: p.deathTime, st: p.spawnTime, sy: p.spawnAngles[1],
-      });
+      };
+      if (p.skin) sp.sk = p.skin; if (p.color != null) sp.col = p.color; // chosen skin / colour (absent = defaults)
+      players.push(sp);
     }
     const projectiles = [];
     for (const pr of this.projectiles.values()) projectiles.push({ id: pr.id, t: pr.type, o: pr.origin, v: pr.velocity, ow: pr.owner, sq: pr.seq });
@@ -682,7 +687,7 @@ export class Game {
       seen.add(sp.id);
       let p = this.players.get(sp.id);
       if (!p) { p = this.addPlayer(sp.id, sp.n); p.dead = true; }
-      p.name = sp.n;
+      p.name = sp.n; p.skin = sp.sk || null; p.color = sp.col ?? null;
       p.ps.origin = copy(sp.o); p.ps.velocity = copy(sp.v); p.ps.viewangles = [sp.a[0], sp.a[1], 0];
       p.health = sp.h; p.armor = sp.ar; p.weapon = sp.w; p.pendingWeapon = sp.pw; p.weaponState = sp.ws; p.weaponTime = sp.wt;
       p.dead = !!sp.d; p.frags = sp.f; p.deaths = sp.dt; p.ps.pmFlags = sp.pf; p.ps.pmTime = sp.pt; p.ps.groundEntity = !!sp.g; p.ps.viewHeight = sp.vh;

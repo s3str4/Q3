@@ -8,7 +8,7 @@
 // countdown is held until every client answered LOADED (or 30 s pass).
 import { Game, MAX_CMD_QUEUE as GAME_MAX_CMD_QUEUE } from './game.js';
 import { Bot } from './bot.js';
-import { TICK_MS, TICK_RATE } from './constants.js';
+import { TICK_MS, TICK_RATE, PLAYER_SKINS, PLAYER_COLORS } from './constants.js';
 import { PROTOCOL_VERSION, MSG, compactSnapshot } from './protocol.js';
 import { loadMap as defaultLoadMap } from './map.js';
 import { MAPS } from '../maps/index.js';
@@ -80,8 +80,11 @@ export class GameSession {
           if (b !== undefined) this.removeBot(b); else { this.send(c, { t: MSG.KICK, reason: 'server full' }); c.link.close(); return; }
         }
         c.name = String(msg.name || `player${c.id}`).slice(0, 24);
+        // identity: skin must be a known name, colour an index into the palette; anything else means the defaults
+        c.skin = PLAYER_SKINS.includes(msg.skin) ? msg.skin : null;
+        c.color = Number.isInteger(msg.color) && msg.color >= 0 && msg.color < PLAYER_COLORS.length ? msg.color : null;
         c.joined = true;
-        this.game.addPlayer(c.id, c.name);
+        this.game.addPlayer(c.id, c.name, { skin: c.skin, color: c.color });
         this.sendWelcome(c);
         this.log(`player ${c.id} "${c.name}" joined`);
         if (msg.bot && this.game.players.size < 2 && this.bots.size === 0) this.addBot(undefined, Number.isFinite(msg.botSkill) ? msg.botSkill : undefined);
@@ -199,7 +202,7 @@ export class GameSession {
     this.map = map; this.opts.mode = MODES.includes(mode) ? mode : this.opts.mode;
     const old = this.game;
     const game = this.newGame(map, this.opts.mode);
-    for (const c of this.clients.values()) if (c.joined) { const p = game.addPlayer(c.id, c.name); const op = old.players.get(c.id); if (op) p.ping = op.ping; }
+    for (const c of this.clients.values()) if (c.joined) { const p = game.addPlayer(c.id, c.name, { skin: c.skin, color: c.color }); const op = old.players.get(c.id); if (op) p.ping = op.ping; }
     for (const [id, b] of this.bots) { const p = game.addPlayer(id, b.p.name, { isBot: true }); this.bots.set(id, new Bot(game, p, { skill: b.skill, seed: this.opts.seed + id })); }
     this.game = game;
     // hold the countdown until every client has rebuilt its game for this map

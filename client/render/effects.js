@@ -4,7 +4,7 @@
 // meshes (rail trails, shock rings, gibs, beams) through small pre-built pools and decals through two shared
 // materials with per-vertex alpha, so nothing allocates a material or a program once the match is running.
 import * as THREE from 'three';
-import { WEAPONS, WEAPON_DEFS, EV, PM } from '../../shared/constants.js';
+import { WEAPONS, WEAPON_DEFS, EV, PM, playerColorHex } from '../../shared/constants.js';
 import { ma, normalize, sub, dist } from '../../shared/vec3.js';
 import { traceBox } from '../../shared/trace.js';
 import { clipPolygon } from '../../shared/brush.js';
@@ -14,6 +14,7 @@ import { Beam } from './beam.js';
 import { weaponColor } from './weapons.js';
 
 const rgb = (hex) => [((hex >> 16) & 255) / 255, ((hex >> 8) & 255) / 255, (hex & 255) / 255];
+const RAIL_DEFAULT = 0x73b3ff; // rail colour for players without a chosen colour (bots): Q3's light blue
 const rnd = (a, b) => a + Math.random() * (b - a);
 const LG_RANGE = WEAPON_DEFS[WEAPONS.LIGHTNING].range;
 const FIREBALL_FRAMES = 16;
@@ -112,7 +113,7 @@ export class Effects {
   event(e, cg, r) {
     switch (e.type) {
       case EV.EXPLODE: this.explosion(e.origin, e.normal, e.weapon); break;
-      case EV.RAIL_TRAIL: this.railTrail(e.start, e.end, e.id === cg.localId); break;
+      case EV.RAIL_TRAIL: { const shooter = cg.game && cg.game.players.get(e.id); this.railTrail(e.start, e.end, e.id === cg.localId, playerColorHex(shooter && shooter.color, RAIL_DEFAULT)); break; }
       case EV.LG_HIT: this.lgHit(e.origin, e.world, e.normal); break;
       case EV.BULLET_IMPACT: this.impact(e.origin, e.normal, e.weapon); break;
       case EV.PAIN: if (e.id !== cg.localId) this.bloodSpray(e.origin, e.damage); break;
@@ -330,15 +331,17 @@ export class Effects {
     const col = geo.attributes.color;
     this.add({ life, obj: m, upd: (k) => { if (k > 0.7) { const a = opacity * (1 - (k - 0.7) / 0.3); for (let i = 0; i < col.count; i++) col.setW(i, a); col.needsUpdate = true; } }, done: () => { this.decalCount--; geo.dispose(); } });
   }
-  // Quake 3 rail trail (CG_RailTrail): a straight core line the colour of the shooter's rail (default light blue)
-  // and a helix of small discs around it, RADIUS 4 / SPACING 5 units, that rotate as they fade over ~1 s. No halo,
-  // no expanding rings: the whole effect is thin and precise, which is what makes it readable.
-  railTrail(start, end, own) {
+  // Quake 3 rail trail (CG_RailTrail): a straight core line the colour of the shooter's rail (Q3 color1: the
+  // shooter's chosen colour, default light blue) and a helix of small discs around it, RADIUS 4 / SPACING 5 units,
+  // that rotate as they fade over ~1 s. No halo, no expanding rings: the whole effect is thin and precise, which is
+  // what makes it readable.
+  railTrail(start, end, own, color = RAIL_DEFAULT) {
     const len = Math.max(1, dist(start, end)); const dir = normalize(sub(end, start));
     const mid = ma(start, len / 2, dir);
+    const c = rgb(color), glow = c.map((x) => 0.25 + x * 1.05); // the disc / ring tint, pushed a little over 1 for the bloom
     const g = this.railMeshes.acquire(); const core = g.userData.core, halo = g.userData.halo;
-    core.scale.set(0.9, len, 0.9); core.material.color.setRGB(1.0, 1.0, 1.0); core.material.opacity = 1;
-    halo.scale.set(1.2, len, 1.2); halo.material.color.setRGB(0.45, 0.7, 1.0); halo.material.opacity = 0.55;
+    core.scale.set(0.9, len, 0.9); core.material.color.setRGB(0.6 + c[0] * 0.4, 0.6 + c[1] * 0.4, 0.6 + c[2] * 0.4); core.material.opacity = 1;
+    halo.scale.set(1.2, len, 1.2); halo.material.color.setRGB(c[0], c[1], c[2]); halo.material.opacity = 0.55;
     g.position.set(...mid); g.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(...dir));
     const up = Math.abs(dir[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
     const p1 = normalize([dir[1] * up[2] - dir[2] * up[1], dir[2] * up[0] - dir[0] * up[2], dir[0] * up[1] - dir[1] * up[0]]);
@@ -351,11 +354,11 @@ export class Effects {
       const ox = p1[0] * cx * RADIUS + p2[0] * sx * RADIUS, oy = p1[1] * cx * RADIUS + p2[1] * sx * RADIUS, oz = p1[2] * cx * RADIUS + p2[2] * sx * RADIUS;
       // each disc orbits the core slowly (Q3 rotates the ring angle over the trail's life): tangential velocity
       const tx = (-p1[0] * sx + p2[0] * cx) * 2.5, ty = (-p1[1] * sx + p2[1] * cx) * 2.5, tz = (-p1[2] * sx + p2[2] * cx) * 2.5;
-      this.glow.spawn({ pos: [p[0] + ox, p[1] + oy, p[2] + oz], vel: [tx, ty, tz], life: 1000, size: 2.2, color: [0.5, 0.75, 1.3], alpha: 0.9, fade: 2, grow: 0.2, px: 22 });
+      this.glow.spawn({ pos: [p[0] + ox, p[1] + oy, p[2] + oz], vel: [tx, ty, tz], life: 1000, size: 2.2, color: glow, alpha: 0.9, fade: 2, grow: 0.2, px: 22 });
     }
     this.railMeshes.own(g, this.add({ life: 1000, obj: null, upd: (k) => { core.material.opacity = Math.max(0, 1 - k * 1.6); halo.material.opacity = 0.55 * (1 - k); } }));
-    this.flash(ma(start, 40, dir), 0x8fc8ff, 1200, 300, 200, (k) => 1 - k);
-    this.impact(end, normalize(sub(start, end)), WEAPONS.RAIL);
+    this.flash(ma(start, 40, dir), color, 1200, 300, 200, (k) => 1 - k);
+    this.impact(end, normalize(sub(start, end)), WEAPONS.RAIL, color);
   }
   lgHit(origin, world, normal) {
     if (!world) { this.bloodSpray(origin, 8); return; }
@@ -363,17 +366,19 @@ export class Effects {
     for (let i = 0; i < 4; i++) this.sparks.spawn({ pos: origin, vel: [(n[0] + rnd(-1, 1)) * rnd(100, 260), (n[1] + rnd(-1, 1)) * rnd(100, 260), (n[2] + rnd(-0.3, 1)) * rnd(100, 260)], life: rnd(200, 400), size: 1.8, color: [0.8, 0.92, 1.1], gravity: 600, fade: 3, px: 28 });
     if (Math.random() < 0.15) this.decal(origin, n, 8, 0.5, 8000);
   }
-  impact(origin, normal, weapon) {
-    const color = weaponColor(weapon);
+  // tint: the shooter's colour for a rail impact (ring, glow and sparks take it, like the trail); other weapons use their own
+  impact(origin, normal, weapon, tint = null) {
     const rail = weapon === WEAPONS.RAIL;
+    const color = rail && tint != null ? tint : weaponColor(weapon);
+    const railGlow = rgb(color).map((c) => 0.25 + c * 1.05);
     this.flash(ma(origin, rail ? 22 : 16, normal), color, rail ? 2400 : 450, rail ? 300 : 160, rail ? 300 : 120);
     this.glow.spawn({ pos: ma(origin, 2, normal), life: rail ? 260 : 90, size: rail ? 18 : 5, grow: 0.8, color: rgb(color).map((c) => c * 1.25), alpha: 0.85, fade: 1, px: rail ? 160 : 48 });
-    if (rail) this.rings.spawn({ pos: ma(origin, 3, normal), life: 300, size: 6, grow: 3, color: [0.5, 0.75, 1.3], alpha: 0.7, fade: 3, frame: 2 });
+    if (rail) this.rings.spawn({ pos: ma(origin, 3, normal), life: 300, size: 6, grow: 3, color: railGlow, alpha: 0.7, fade: 3, frame: 2 });
     const n = rail ? 16 : 5;
     for (let i = 0; i < n; i++) {
       const dir = normalize([normal[0] + rnd(-0.7, 0.7), normal[1] + rnd(-0.7, 0.7), normal[2] + rnd(-0.7, 0.7)]);
       const spd = rnd(100, 320);
-      this.sparks.spawn({ pos: origin, vel: [dir[0] * spd, dir[1] * spd, dir[2] * spd], life: rnd(250, 600), size: rail ? 1.6 : 1.2, color: rail ? [0.6, 0.85, 1.3] : [1.4, 1.1, 0.6], gravity: 700, drag: 0.8, fade: 3, shrink: 0.7, px: 24 });
+      this.sparks.spawn({ pos: origin, vel: [dir[0] * spd, dir[1] * spd, dir[2] * spd], life: rnd(250, 600), size: rail ? 1.6 : 1.2, color: rail ? railGlow : [1.4, 1.1, 0.6], gravity: 700, drag: 0.8, fade: 3, shrink: 0.7, px: 24 });
     }
     // dust puff (a random sheet variant) + a couple of chips
     this.smoke.spawn({ pos: ma(origin, 3, normal), vel: [normal[0] * 20, normal[1] * 20, normal[2] * 20 + 10], life: rnd(400, 700), size: rail ? 12 : 6, grow: 2.5, color: [0.35, 0.33, 0.3], alpha: 0.45, fade: 3, frame: -1, rot: rnd(0, 6.3) });

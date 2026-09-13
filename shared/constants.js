@@ -77,10 +77,28 @@ export const ITEM_HALF = 15;
 
 // intermission: how long the end screen stays up before the next match starts by itself (same map) when nobody votes.
 // Arena rounds: roundRest shows the round result (players frozen), then roundCountdown (fresh spawns, 3-2-1) before live.
+// physics: 'vq3' (vanilla bg_pmove) or 'cpm' (Challenge ProMode air control, see PHYSICS / CPM below); a match rule
+// chosen by the host, sent in WELCOME/MAPCHANGE rules and honoured identically by the server and by client prediction.
 export const MATCH = {
-  duel: { timelimit: 10 * 60 * 1000, fraglimit: 0, respawnMin: 1700, respawnForce: 5000, warmup: 3000, intermission: 30000 },
-  arena: { rounds: 10, roundTimelimit: 90 * 1000, respawnMin: 0, respawnForce: 0, roundRest: 2000, roundCountdown: 3000, warmup: 3000, intermission: 30000 },
+  duel: { timelimit: 10 * 60 * 1000, fraglimit: 0, respawnMin: 1700, respawnForce: 5000, warmup: 3000, intermission: 30000, physics: 'vq3' },
+  arena: { rounds: 10, roundTimelimit: 90 * 1000, respawnMin: 0, respawnForce: 0, roundRest: 2000, roundCountdown: 3000, warmup: 3000, intermission: 30000, physics: 'vq3' },
 };
+export const PHYSICS = ['vq3', 'cpm'];
+// CPM (Challenge ProMode Arena) air movement: pm_airaccelerate stays 1 for diagonal strafes, reversing direction uses
+// cpm_airstopaccelerate, a sideways-only strafe caps the wish speed at cpm_airwishspeed with pm_strafeaccelerate, and a
+// pure forward/back input steers the horizontal velocity toward the view (PM_Aircontrol, cpm_aircontrol). Ground
+// acceleration and friction stay vq3.
+export const CPM = { airstopaccelerate: 2.5, aircontrol: 150, airwishspeed: 30, strafeaccelerate: 70 };
+
+// Player identity (menu Settings): a skin (the models live in client/render/playermodel.js; this list is what the
+// session accepts in JOIN) and a colour from a Q3-like palette (color1): the model's stripe / visor emissive, the
+// rail trail and the HUD name use it, so the opponent recognises you. Bots keep their name-derived skin and no colour.
+export const PLAYER_SKINS = ['sarge', 'visor', 'anarki'];
+export const PLAYER_COLORS = [
+  { name: 'red', hex: 0xff3b3b }, { name: 'orange', hex: 0xff8a2a }, { name: 'yellow', hex: 0xffd23a }, { name: 'green', hex: 0x5cff6a },
+  { name: 'cyan', hex: 0x3cf2ff }, { name: 'blue', hex: 0x4ab3ff }, { name: 'purple', hex: 0x9d5cff }, { name: 'magenta', hex: 0xff4ae0 }, { name: 'white', hex: 0xf4f6ff },
+];
+export const playerColorHex = (i, fallback) => (Number.isInteger(i) && PLAYER_COLORS[i] ? PLAYER_COLORS[i].hex : fallback);
 // Practice bot difficulty tiers (menu labels -> Bot skill)
 export const BOT_TIERS = { easy: 0.3, normal: 0.6, hard: 0.8, pro: 0.95 };
 

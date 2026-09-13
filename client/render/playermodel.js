@@ -9,7 +9,7 @@
 //   readability  team-coloured emissive stripe + visor on every skin, blob shadow under the feet.
 // Three skins (sarge: olive, visor: blue-white, anarki: magenta) are chosen from the player's name.
 import * as THREE from 'three';
-import { WEAPONS, EV } from '../../shared/constants.js';
+import { WEAPONS, EV, playerColorHex } from '../../shared/constants.js';
 import { makeWeaponMesh, ambientLightMap, MODEL_AMBIENT } from './weapons.js';
 import { getSprite } from './particles.js';
 
@@ -21,6 +21,7 @@ const SKINS = {
   anarki: { base: [0.90, 0.28, 0.74], plate: [0.50, 0.46, 0.56], suit: [0.32, 0.26, 0.36], flesh: [0.88, 0.76, 0.72], face: true },
 };
 export const SKIN_NAMES = Object.keys(SKINS);
+export const SKIN_PALETTE = SKINS; // read-only palette for the menu preview
 export function skinFor(name, id = 0) {
   let h = id * 7; for (const ch of String(name || '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
   return SKIN_NAMES[h % SKIN_NAMES.length];
@@ -136,11 +137,16 @@ const ease = (t) => t * t * (3 - 2 * t);
 let shadowMat = null, shadowGeo = null;
 
 export class PlayerModel {
+  // color: the default colour for this model (the renderer's own / enemy colour); name -> default skin. A chosen
+  // skin / colour arriving in the snapshot (sk / col) replaces both, see setSkin().
   constructor(scene, color, name = '', id = 0) {
     this.scene = scene; this.color = color; this.id = id;
-    this.skin = SKINS[name] ? name : skinFor(name, id); // a player named after a skin gets it
+    this.defaultSkin = this.skin = SKINS[name] ? name : skinFor(name, id); // a player named after a skin gets it
+    this.defaultColor = color;
     const M = this.mats = skinMaterials(this.skin, color);
-    const mesh = (parent, g, m, x = 0, y = 0, z = 0, sx = 1, sy = 1, sz = 1) => { const o = new THREE.Mesh(g, m); o.position.set(x, y, z); o.scale.set(sx, sy, sz); parent.add(o); return o; };
+    // body parts carry their material role so a later setSkin() can swap every material in one pass
+    const mesh = (parent, g, m, x = 0, y = 0, z = 0, sx = 1, sy = 1, sz = 1) => { const o = new THREE.Mesh(g, m); o.position.set(x, y, z); o.scale.set(sx, sy, sz); o.userData.role = ROLE.get(m); parent.add(o); return o; };
+    const ROLE = new Map([[M.armor, 'armor'], [M.plate, 'plate'], [M.suit, 'suit'], [M.flesh, 'flesh'], [M.visor, 'visor']]);
     this.root = new THREE.Group();
     // ---- legs + pelvis (turn toward the movement direction) ----
     this.legs = new THREE.Group(); this.root.add(this.legs);
@@ -166,7 +172,7 @@ export class PlayerModel {
     // ---- head ----
     this.head = new THREE.Group(); this.head.position.z = 23.5; this.torso.add(this.head);
     const sk = SKINS[this.skin];
-    mesh(this.head, zsph(5, 12, 9), sk.face ? M.flesh : M.suit, 0, 0, 0, 1, 0.95, 1.08);
+    this.headMesh = mesh(this.head, zsph(5, 12, 9), sk.face ? M.flesh : M.suit, 0, 0, 0, 1, 0.95, 1.08); this.headMesh.userData.role = 'face';
     mesh(this.head, helmetCap(5.9), M.armor, -0.4, 0, 0.4, 1, 1, 0.9); mesh(this.head, helmetSkirt(5.9), M.armor, -0.4, 0, 0.4, 1, 1, 0.9);
     mesh(this.head, bx(1.6, 7.2, 2.4), M.visor, 4.6, 0, 1.2); mesh(this.head, bx(2, 6, 1.6), M.plate, 4.3, 0, -0.4); // visor + brow
     mesh(this.head, bx(2.2, 5.6, 2.2), M.plate, 3.6, 0, -3.4);                            // chin guard
@@ -193,6 +199,15 @@ export class PlayerModel {
     this.fireAt = -1e9; this.fireWeapon = 0; this.painAt = -1e9; this.painSide = 1; this.landAt = -1e9; this.landHard = false; this.jumpAt = -1e9;
     this.bladeAngle = 0; this.bladeSpin = 0;
     this.gripR = new THREE.Vector3(); this.gripL = new THREE.Vector3(); this.restL = new THREE.Vector3(3, 6, -14);
+  }
+  // Swap to another (skin, colour): every body part takes the material of its role from the cached set for that
+  // combination (same shader programs, no compile); weapon meshes are untouched.
+  setSkin(skin, color) {
+    if (!SKINS[skin]) skin = this.defaultSkin;
+    if (skin === this.skin && color === this.color) return;
+    this.skin = skin; this.color = color;
+    const M = this.mats = skinMaterials(skin, color), face = SKINS[skin].face;
+    this.root.traverse((o) => { const r = o.userData && o.userData.role; if (!r) return; o.material = r === 'face' ? (face ? M.flesh : M.suit) : M[r]; });
   }
   // events for this player (renderer.event forwards FIRE / PAIN / LAND / JUMP by id)
   event(e, now) {
@@ -223,6 +238,7 @@ export class PlayerModel {
     const dead = !!r.d;
     if (dead && !this.dead) { this.deadAt = now; this.deathKind = (this.id + this.deaths++) % 3; }
     this.dead = dead;
+    this.setSkin(r.sk || this.defaultSkin, playerColorHex(r.col, this.defaultColor)); // the player's chosen identity (snapshot sk / col)
     this.setWeapon(r.w);
     // blob shadow follows the floor, fades with height
     if (floorZ !== undefined) { const h = origin[2] - 24 - floorZ; this.shadow.position.set(origin[0], origin[1], floorZ + 0.4); this.shadow.material.opacity = Math.max(0, 0.55 - h / 300); this.shadow.visible = !dead || now - this.deadAt < 600; }

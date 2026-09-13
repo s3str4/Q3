@@ -15,6 +15,7 @@ export class ClientGame {
     this.game = new Game(map, { mode: opts.mode || 'duel', isServer: false, lagComp: false });
     this.localId = 0;
     this.name = opts.name || 'player';
+    this.skin = opts.skin || null; this.color = Number.isInteger(opts.color) ? opts.color : null; // identity sent in JOIN (echoed in snapshots as sk / col)
     this.pending = []; // unacked commands
     this.seq = 0;
     this.snapshots = []; // recent snapshots for interpolation
@@ -44,6 +45,7 @@ export class ClientGame {
   // opts.bot: ask the server to add a practice bot (with opts.botSkill) when the match has room.
   join(opts = {}) {
     const msg = { t: MSG.JOIN, name: this.name, v: PROTOCOL_VERSION };
+    if (this.skin) msg.skin = this.skin; if (this.color != null) msg.color = this.color;
     if (opts.bot) { msg.bot = true; msg.botSkill = opts.botSkill ?? 0.6; }
     this.transport.send(msg);
     // resend until WELCOME arrives (unreliable P2P channel / simulated loss); the server ignores duplicate joins

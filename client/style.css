@@ -135,4 +135,20 @@ details { margin: 8px 0; font-size: 13px; } summary { cursor: pointer; opacity: 
 #room-box b { font-family: Consolas, monospace; font-size: 26px; letter-spacing: 5px; color: var(--accent); }
 #room-box button { flex: 0 0 auto; padding: 6px 10px; font-size: 11px; }
 #menu-status, #p2p-status { font-size: 12px; color: var(--accent); min-height: 16px; margin-top: 8px; }
+/* identity: skin + colour picker with a canvas preview of the model */
+.ident { display: flex; gap: 14px; align-items: center; margin: 8px 0 4px; }
+.ident-col { flex: 1; min-width: 0; }
+#skin-preview { flex: 0 0 96px; width: 96px; height: 128px; background: radial-gradient(ellipse at 50% 40%, #1b2233 0%, #0a0d14 80%); border: 1px solid #2c3648; border-radius: 4px; }
+.palette { display: inline-flex; gap: 5px; flex-wrap: wrap; }
+.palette .sw { width: 20px; height: 20px; border-radius: 3px; border: 2px solid transparent; cursor: pointer; background: var(--c); box-shadow: 0 0 6px var(--c); opacity: 0.8; }
+.palette .sw:hover { opacity: 1; } .palette .sw.on { border-color: #fff; opacity: 1; transform: scale(1.12); }
+/* keys panel */
+#keys { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; }
+#keys td { padding: 3px 6px; border-top: 1px solid #1c2334; }
+#keys td.a { letter-spacing: 1px; opacity: 0.85; }
+#keys td.b { text-align: right; width: 46%; }
+#keys .kb { flex: none; padding: 4px 10px; font-family: Consolas, monospace; font-size: 12px; letter-spacing: 1px; min-width: 120px; background: #0a0d14; border-color: #2c3648; }
+#keys .kb.listening { background: var(--accent); color: #1a1000; border-color: #ffd28a; animation: pulse 0.8s infinite; }
+#keys-hint { margin-top: 6px; }
+#keys-panel .row { margin: 8px 0 0; } #keys-reset { flex: none; padding: 6px 12px; font-size: 11px; }
 .fade-in { animation: fadein 250ms ease-out forwards; } @keyframes fadein { from { opacity: 0 } to { opacity: 1 } }

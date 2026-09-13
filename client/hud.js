@@ -1,7 +1,7 @@
 // DOM HUD (Q3 style): big tabular health/armor/ammo, weapon bar, frag counters + timer, pickup text, obituaries
 // with weapon colour chips, item timers, net graph (frame-time bars + ping), damage-direction arcs, screen flashes,
 // scoreboard. Cheap by design: text nodes are only touched when a value changes.
-import { WEAPON_DEFS, WEAPON_ORDER, WEAPONS, ITEMS, EV } from '../shared/constants.js';
+import { WEAPON_DEFS, WEAPON_ORDER, WEAPONS, ITEMS, EV, playerColorHex } from '../shared/constants.js';
 import { MAPS } from '../maps/index.js';
 
 const $ = (id) => document.getElementById(id);
@@ -57,6 +57,8 @@ export class Hud {
     this.lastFrame = now;
   }
   set(id, text) { if (this.cache[id] !== text) { this.cache[id] = text; $(id).textContent = text; } }
+  // colour a name element with the player's chosen colour ('' = the stylesheet's own / enemy colour)
+  tint(id, sp) { const c = sp ? playerColorHex(sp.col, null) : null; const v = c != null ? css(c) : ''; if (this.cache['tint:' + id] !== v) { this.cache['tint:' + id] = v; $(id).style.color = v; } }
   update(cg, view, now) {
     const p = view && view.player;
     if (!p) return;
@@ -86,6 +88,7 @@ export class Hud {
     const them = snap && snap.players.find((x) => x.id !== cg.localId);
     this.set('score-me', me ? me.f : 0); this.set('score-them', them ? them.f : '-');
     this.set('name-me', me ? me.n : ''); this.set('name-them', them ? them.n : 'waiting...');
+    this.tint('name-me', me); this.tint('name-them', them); // names in the players' chosen colours
     const m = cg.game.match;
     const arena = cg.game.mode === 'arena';
     if (this.cache.arena !== arena) { this.cache.arena = arena; this.el.classList.toggle('arena', arena); }
@@ -154,10 +157,11 @@ export class Hud {
       case EV.PICKUP: if (e.id === cg.localId) { this.pickup(ITEMS[e.itemType].label); this.flash('pickup-flash', 1, 120); } break;
       case EV.HIT: if (e.id === cg.localId) this.hit(e.damage); break;
       case EV.PAIN: if (e.id === cg.localId) { this.damageFlash(e.damage); this.damageDir(e, cg); } break;
-      case EV.DEATH: { const s = cg.latestSnap; const nm = (id) => { const p = s && s.players.find((x) => x.id === id); return p ? p.n : (cg.game.players.get(id)?.name || 'world'); };
+      case EV.DEATH: { const s = cg.latestSnap; const sp = (id) => (s && s.players.find((x) => x.id === id)) || null; const nm = (id) => { const p = sp(id); return p ? p.n : (cg.game.players.get(id)?.name || 'world'); };
         const mine = (id) => id === cg.localId;
-        const victim = `<span class="${mine(e.id) ? 'me' : 'them'}">${esc(nm(e.id))}</span>`;
-        const html = e.attacker && e.attacker !== e.id ? `<span class="wi"></span>${victim} ${MOD_TEXT[e.mod] || 'was killed by'} <span class="${mine(e.attacker) ? 'me' : 'them'}">${esc(nm(e.attacker))}</span>` : `${victim} ${e.mod === 'fall' ? 'cratered' : e.mod === 'lava' ? 'was burned to a crisp' : 'blew themselves up'}`;
+        const span = (id) => { const p = sp(id), c = p ? playerColorHex(p.col, null) : null; return `<span class="${mine(id) ? 'me' : 'them'}"${c != null ? ` style="color:${css(c)}"` : ''}>${esc(nm(id))}</span>`; };
+        const victim = span(e.id);
+        const html = e.attacker && e.attacker !== e.id ? `<span class="wi"></span>${victim} ${MOD_TEXT[e.mod] || 'was killed by'} ${span(e.attacker)}` : `${victim} ${e.mod === 'fall' ? 'cratered' : e.mod === 'lava' ? 'was burned to a crisp' : 'blew themselves up'}`;
         this.obituary(html, WCOL[e.mod] || '#ff4a4a');
         if (e.id === cg.localId) this.center('YOU DIED', 1600, e.attacker && e.attacker !== e.id ? `killed by ${nm(e.attacker)}` : ''); else if (e.attacker === cg.localId) this.center('FRAG', 700, nm(e.id)); break; }
       case EV.COUNTDOWN: this.hideEnd(); this.center(e.seconds > 0 ? String(e.seconds) : 'FIGHT', 900, e.round ? `ROUND ${e.round}` : ''); break;
@@ -253,10 +257,11 @@ export class Hud {
     const sb = $('scoreboard');
     if (!show) { sb.classList.add('hidden'); return; }
     const s = cg.latestSnap; if (!s) return;
-    const rows = [...s.players].sort((a, b) => b.f - a.f).map((p) => `<tr><td>${esc(p.n)}${p.bot ? ' (bot)' : ''}</td><td>${p.f}</td><td>${p.dt}</td><td>${p.dd}</td><td>${p.shots ? Math.round(100 * p.hits / p.shots) : 0}%</td><td>${p.ping}</td></tr>`).join('');
+    const rows = [...s.players].sort((a, b) => b.f - a.f).map((p) => { const c = playerColorHex(p.col, null); return `<tr><td${c != null ? ` style="color:${css(c)}"` : ''}>${esc(p.n)}${p.bot ? ' (bot)' : ''}${p.sk ? ` <small style="opacity:.55">${esc(p.sk)}</small>` : ''}</td><td>${p.f}</td><td>${p.dt}</td><td>${p.dd}</td><td>${p.shots ? Math.round(100 * p.hits / p.shots) : 0}%</td><td>${p.ping}</td></tr>`; }).join('');
     sb.innerHTML = `<h2>${cg.game.mode.toUpperCase()} · ${esc(cg.map.title || cg.map.name)}</h2><table><tr><th>PLAYER</th><th>FRAGS</th><th>DEATHS</th><th>DMG</th><th>ACC</th><th>PING</th></tr>${rows}</table>`;
     sb.classList.remove('hidden');
   }
 }
 function fmt(ms) { const s = Math.ceil(ms / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; }
 function esc(s) { return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+function css(hex) { return '#' + (hex >>> 0).toString(16).padStart(6, '0'); }

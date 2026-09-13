@@ -49,6 +49,16 @@ on the same server; the bot leaves automatically when a second human joins.
   100 health / 100 armor, no pickups, a 3-2-1 countdown before each round, a round ends at the first kill or after
   90 s in favour of the healthier player, first to 6 rounds wins). Applies to practice and to P2P hosting; the guest
   receives the host's mode and map in the handshake. A dedicated server keeps its `--mode`.
+- **Physics**: *VQ3* (vanilla Quake 3 movement, the default) or *CPM* (Challenge ProMode air control). A match
+  rule like the mode: the host picks it, the guest receives it in the WELCOME / MAPCHANGE `rules.physics` and both
+  the server and the client prediction run the same code (`shared/pmove.js`, `ctx.physics`). CPM keeps vq3 ground
+  acceleration and friction and `pm_airaccelerate 1` for diagonal strafes, and adds the CPMA air rules: a pure
+  forward/back input steers the horizontal velocity toward the view (`PM_Aircontrol`, `cpm_aircontrol 150`), a
+  sideways-only strafe is capped at `cpm_airwishspeed 30` with `pm_strafeaccelerate 70` (the A/D air strafe), and
+  reversing direction uses `cpm_airstopaccelerate 2.5`. Measured in `tests/physics_cpm.test.mjs`: holding forward
+  in the air with the view 60 degrees off the velocity turns the heading to 60.0 degrees in 40 ticks under CPM
+  (19.1 under vq3); a perpendicular side strafe reaches 395.5 ups after 60 ticks (322.7 under vq3). Bots run the same
+  pmove, so they adapt by themselves. A dedicated server keeps its own rules (`createServer({ rules: { physics } })`).
 - **Bot**: practice difficulty. Easy / Normal / Hard / Pro map to bot skill 0.3 / 0.6 / 0.8 / 0.95 (reaction 420 to
   160 ms, aim noise 6.6 to 1.4 degrees, dodge chance 25 to 90 %, more frequent strafe changes and hops, a stricter
   rail trigger at the top). In 180 s headless duels a Pro bot beats a Normal one about 3:1 and an Easy one loses to
@@ -64,9 +74,10 @@ as both players are ready (a bot is always ready); without any click it restarts
 reloads the arena on every client first: the countdown waits until everyone has loaded.
 
 URL parameters for automation: `?auto=1&bot=1&nolock=1&name=Me` joins a practice match without pointer lock;
-`?auto=1&local=1` runs a browser-hosted practice match instead; `mode=arena`, `skill=pro`, `map=lava_spire`
-pre-select the menu; `rules={"rounds":3,"roundTimelimit":6000}` overrides the match rules of a browser-hosted session
-(only honoured when the page is served from localhost).
+`?auto=1&local=1` runs a browser-hosted practice match instead; `mode=arena`, `skill=pro`, `map=lava_spire`,
+`physics=cpm`, `skin=visor`, `color=2` pre-select the menu; `rules={"rounds":3,"roundTimelimit":6000}` overrides the
+match rules of a browser-hosted session and `map=testbox` may name any map module (both only honoured when the page
+is served from localhost).
 
 ### Server flags
 
@@ -148,12 +159,15 @@ Pages, a plain web server) as long as it serves `dist/` over HTTPS.
 
 ## Controls
 
+Default bindings (every one of them can be changed, see **Keys** below):
+
 | Action | Keys |
 |---|---|
 | Move | W A S D (arrow keys also work) |
 | Jump | Space |
 | Crouch | Ctrl, C or Shift |
 | Fire | Left mouse button |
+| Zoom | Right mouse button |
 | Weapons | 1 gauntlet, 2 machinegun, 3 shotgun, 4 rocket launcher, 5 lightning gun, 6 railgun, 7 plasma gun; mouse wheel / Q / E cycle |
 | Scoreboard | Tab (hold) |
 | Menu / release mouse | Esc |
@@ -165,6 +179,22 @@ Mouse look uses Q3's `m_yaw 0.022` degrees per count times the sensitivity setti
 In the menu under **Settings** (stored in `localStorage`): sensitivity (1-20), field of view (80-130), master volume,
 large crosshair, and interpolation buffer in snapshots (1-4; 2 = 33 ms is the default and what the lag compensation
 is tuned for; raise it on very jittery connections).
+
+**Skin and colour**: pick one of the three player models (Sarge, Visor, Anarki) and a colour from a Q3-like palette
+(red, orange, yellow, green, cyan, blue, purple, magenta, white); the preview shows the figure with the colour on the
+visor and the chest stripe. The choice is sent in JOIN (`skin`, `color`) and echoed in every snapshot player entry
+(`sk`, `col`), so the opponent sees your model in your colour (the emissive stripe and visor), your rail trail and rail
+impact are drawn in your colour on both screens (Q3 `color1`), the first-person arms wear your skin, and the HUD
+score boxes, obituaries and the scoreboard show names in their colours. The session validates both (an unknown skin
+or colour index means the defaults); bots keep their name-derived skins and the default colours. The protocol
+version stays 4: the new fields are optional on both sides.
+
+**Keys**: the panel lists every action (move, jump, crouch, fire, zoom, weapons 1-7, next / previous weapon,
+scoreboard) with its current binding. Click a binding, then press a key, a mouse button or turn the wheel to rebind
+it (Esc cancels); a key can only drive one action, so binding it elsewhere unbinds it there. Mouse buttons appear as
+LMB / MMB / RMB, the wheel as WHEEL UP / WHEEL DOWN. **Reset defaults** restores the table above. Bindings live in
+`localStorage` with the other settings; `client/input.js` resolves everything through the bindings map, and the help
+line under the menu shows the current summary.
 
 ## Tests and evidence
 
@@ -181,7 +211,9 @@ node tools/audio_measure.mjs --port 27974                  # offline render of e
 scripted input and writes screenshots plus fps/frame-time/netcode statistics to `.evidence/<name>/stats.json`.
 
 The test files: `tests/benchmark.test.mjs` asserts every `[test]` row of `docs/BENCHMARK.md` against the constants and
-against live simulation measurements; `tests/game.test.mjs` covers damage/armor/knockback, splash, rocket jumps,
+against live simulation measurements; `tests/physics_cpm.test.mjs` measures the CPM air control against vq3 (heading
+change, side-strafe speed, braking, unchanged ground movement, the rule's path through Game / session / WELCOME) and
+the JOIN skin / colour validation; `tests/game.test.mjs` covers damage/armor/knockback, splash, rocket jumps,
 items, spawns, telefrag, duel and arena match flow, out-of-ammo switching, lag-compensation rewind and the bots;
 `tests/netcode.test.mjs` runs the real server with two headless clients at 0 ms, 100 ± 20 ms / 2 % and
 150 ± 30 ms / 2 % loss and checks prediction error, acks, snapshot rate, consistency, lag compensation hit rates

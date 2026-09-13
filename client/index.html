@@ -65,6 +65,7 @@
     <label>Server <input id="server" value=""></label>
     <label>Map <select id="map"></select><span id="map-blurb" class="blurb"></span></label>
     <label>Mode <select id="mode"><option value="duel">Duel</option><option value="arena">Arena</option></select><span id="mode-blurb" class="blurb"></span></label>
+    <label>Physics <select id="physics"><option value="vq3">VQ3</option><option value="cpm">CPM</option></select><span id="physics-blurb" class="blurb"></span></label>
     <label>Bot <select id="bot-skill"><option value="easy">Easy</option><option value="normal">Normal</option><option value="hard">Hard</option><option value="pro">Pro</option></select><span class="blurb">practice difficulty (reaction, aim, dodging)</span></label>
     <div class="row">
       <button id="btn-connect" class="primary">CONNECT</button>
@@ -80,14 +81,26 @@
         <div class="row"><button id="btn-copy-link" class="hidden">COPY INVITE LINK</button><button id="btn-copy-code" class="hidden">COPY CODE</button></div>
       </details>
     </details>
-    <details><summary>Settings</summary>
+    <details id="settings"><summary>Settings</summary>
+      <div class="ident">
+        <canvas id="skin-preview" width="96" height="128" title="your model as the opponent sees it"></canvas>
+        <div class="ident-col">
+          <label>Skin <select id="skin"></select><span id="skin-blurb" class="blurb"></span></label>
+          <label>Colour <span id="colors" class="palette"></span><span id="color-name" class="blurb"></span></label>
+        </div>
+      </div>
       <label>Sensitivity <input id="sens" type="range" min="1" max="20" step="0.5" value="5"><span id="sens-v">5</span></label>
       <label>FOV <input id="fov" type="range" min="80" max="130" step="1" value="100"><span id="fov-v">100</span></label>
       <label>Master volume <input id="vol" type="range" min="0" max="1" step="0.05" value="0.8"></label>
       <label><input id="opt-cshair" type="checkbox"> Large crosshair</label>
       <label><input id="opt-interp" type="range" min="1" max="4" step="1" value="2"> Interpolation (snapshots)</label>
+      <details id="keys-panel"><summary>Keys</summary>
+        <table id="keys"></table>
+        <div class="row"><button id="keys-reset">RESET DEFAULTS</button></div>
+        <div id="keys-hint" class="blurb">click a binding, then press a key or mouse button (Esc cancels)</div>
+      </details>
     </details>
-    <p class="help">WASD move · Space jump · Ctrl crouch · Mouse fire · 1-7 / wheel weapons · Tab scoreboard · Esc menu</p>
+    <p id="help" class="help">WASD move · SPACE jump · L-CTRL crouch · LMB fire · 1-7 / wheel weapons · TAB scoreboard · Esc menu</p>
     <div id="menu-status"></div>
   </div>
 </div>
