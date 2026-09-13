@@ -2,106 +2,106 @@
  "welcome": {
   "file": "welcome.wav",
   "text": "Welcome to the arena.",
-  "ms": 1577
+  "ms": 1511
  },
  "prepare": {
   "file": "prepare.wav",
   "text": "Prepare to fight.",
-  "ms": 1458
+  "ms": 1399
  },
  "three": {
   "file": "three.wav",
   "text": "Three.",
-  "ms": 969
+  "ms": 939
  },
  "two": {
   "file": "two.wav",
   "text": "Two.",
-  "ms": 900
+  "ms": 875
  },
  "one": {
   "file": "one.wav",
   "text": "One.",
-  "ms": 1043
+  "ms": 1009
  },
  "fight": {
   "file": "fight.wav",
   "text": "Fight!",
-  "ms": 1033
+  "ms": 1000
  },
  "excellent": {
   "file": "excellent.wav",
   "text": "Excellent!",
-  "ms": 1198
+  "ms": 1155
  },
  "impressive": {
   "file": "impressive.wav",
   "text": "Impressive!",
-  "ms": 1383
+  "ms": 1328
  },
  "humiliation": {
   "file": "humiliation.wav",
   "text": "Humiliation!",
-  "ms": 1603
+  "ms": 1535
  },
  "perfect": {
   "file": "perfect.wav",
   "text": "Perfect!",
-  "ms": 1249
+  "ms": 1202
  },
  "taken_lead": {
   "file": "taken_lead.wav",
   "text": "You have taken the lead.",
-  "ms": 1621
+  "ms": 1552
  },
  "lost_lead": {
   "file": "lost_lead.wav",
   "text": "You have lost the lead.",
-  "ms": 1600
+  "ms": 1531
  },
  "tied_lead": {
   "file": "tied_lead.wav",
   "text": "Tied for the lead.",
-  "ms": 1396
+  "ms": 1341
  },
  "one_minute": {
   "file": "one_minute.wav",
   "text": "One minute warning.",
-  "ms": 1538
+  "ms": 1473
  },
  "five_minute": {
   "file": "five_minute.wav",
   "text": "Five minute warning.",
-  "ms": 1609
+  "ms": 1540
  },
  "one_frag": {
   "file": "one_frag.wav",
   "text": "One frag left.",
-  "ms": 1469
+  "ms": 1409
  },
  "two_frags": {
   "file": "two_frags.wav",
   "text": "Two frags left.",
-  "ms": 1555
+  "ms": 1489
  },
  "three_frags": {
   "file": "three_frags.wav",
   "text": "Three frags left.",
-  "ms": 1560
+  "ms": 1494
  },
  "sudden_death": {
   "file": "sudden_death.wav",
   "text": "Sudden death.",
-  "ms": 1294
+  "ms": 1245
  },
  "you_win": {
   "file": "you_win.wav",
   "text": "You win.",
-  "ms": 1045
+  "ms": 1012
  },
  "you_lose": {
   "file": "you_lose.wav",
   "text": "You lose.",
-  "ms": 1188
+  "ms": 1146
  }
 }

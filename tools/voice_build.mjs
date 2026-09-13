@@ -4,7 +4,7 @@
 //   2. this script trims the silence, resamples the take down (PITCH < 1: deeper voice, formants included - the Q3 announcer
 //      register), drives it through a soft saturator, adds a short arena slap-back and a vintage lowpass, normalizes the
 //      peak and writes 16-bit PCM WAVs the client decodes with decodeAudioData().
-// Usage: node tools/voice_build.mjs [--raw DIR] [--no-tts] [--pitch 0.78] [--rate fast] [--only fight,excellent]
+// Usage: node tools/voice_build.mjs [--raw DIR] [--no-tts] [--pitch 0.58] [--stretch 1.25] [--rate fast] [--only fight,excellent]
 //   --no-tts reuses the raw takes of a previous run (kept in --raw, default <scratch>/voice_raw) so processing can be re-tuned
 //   without re-synthesizing. Windows only for the synthesis step (the processing step is portable).
 import fs from 'node:fs';
@@ -17,7 +17,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, 'client', 'audio', 'voice');
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, all) => a.startsWith('--') ? [a.slice(2), all[i + 1] && !all[i + 1].startsWith('--') ? all[i + 1] : true] : []).filter(Boolean));
 const RAW = path.resolve(args.raw || path.join(os.tmpdir(), 'arena_voice_raw'));
-const PITCH = +(args.pitch || 0.68);       // resample factor: 0.68 = about -6.7 semitones (formants follow: a bigger chest); deeper than this smears the consonants
+const PITCH = +(args.pitch || 0.58);       // resample factor: 0.58 = about -9.4 semitones (formants follow: a much bigger chest)
+const STRETCH = +(args.stretch || 1.25);   // time compression after the resample (WSOLA, pitch kept) so the deep voice still talks at a normal pace
 const RATE = args.rate || 'fast';          // SSML prosody rate before the slow-down; 'fast' keeps the articulation clean ('x-fast' slurs Zira)
 const VOICE = args.voice || 'Microsoft Zira Desktop';
 const SR = 22050;
@@ -116,6 +117,27 @@ const reverb = (x, rate, { wet = 0.32, taps = [[0.019, 0.5], [0.031, 0.35], [0.0
   for (let i = 0; i < n; i++) { const src = (i < x.length ? x[i] : 0) + (i >= k ? line[i - k] * fb : 0); lp = (1 - a) * src + a * lp; line[i] = lp; if (i >= k) out[i] += line[i - k] * wet * 0.6; }
   return out;
 };
+// WSOLA time compression by `factor` (> 1 = shorter, pitch unchanged): Hann grains of 46 ms at 50% overlap, each grain taken
+// from the position near its nominal spot that best continues the previous one (cross-correlation over +-6 ms).
+const stretch = (x, rate, factor) => {
+  if (Math.abs(factor - 1) < 1e-3) return x;
+  const N = 1024, H = 512, tol = Math.round(0.006 * rate);
+  const win = new Float32Array(N); for (let i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / N);
+  const outLen = Math.floor(x.length / factor); const out = new Float32Array(outLen + N), norm = new Float32Array(outLen + N);
+  let prevPos = 0;
+  for (let k = 0; k * H < outLen; k++) {
+    const target = Math.round(k * H * factor); let bestPos = target;
+    if (k > 0 && prevPos + H + N <= x.length) {
+      let bestCorr = -Infinity;
+      for (let d = -tol; d <= tol; d++) { const pos = target + d; if (pos < 0 || pos + N > x.length) continue; let c = 0; for (let i = 0; i < N; i += 2) c += x[pos + i] * x[prevPos + H + i]; if (c > bestCorr) { bestCorr = c; bestPos = pos; } }
+    }
+    if (bestPos + N > x.length) break;
+    for (let i = 0; i < N; i++) { out[k * H + i] += x[bestPos + i] * win[i]; norm[k * H + i] += win[i]; }
+    prevPos = bestPos;
+  }
+  for (let i = 0; i < outLen; i++) out[i] /= Math.max(norm[i], 1e-3);
+  return out.subarray(0, outLen);
+};
 const normalize = (x, peak = 0.89) => { let m = 0; for (const v of x) m = Math.max(m, Math.abs(v)); const g = m > 0 ? peak / m : 1; const out = new Float32Array(x.length); for (let i = 0; i < x.length; i++) out[i] = x[i] * g; return out; };
 const fadeOut = (x, rate, ms = 40) => { const k = Math.min(x.length, Math.round(ms / 1000 * rate)); for (let i = 0; i < k; i++) x[x.length - 1 - i] *= i / k; return x; };
 
@@ -123,8 +145,9 @@ function processClip(name) {
   const { rate, samples } = readWav(path.join(RAW, `${name}.wav`));
   let x = trim(samples, rate);
   x = resample(x, PITCH);
+  x = stretch(x, rate, STRETCH);
   x = onePole(x, rate, 60, true);           // rumble off, keep the chest
-  { const low = onePole(x, rate, 260); for (let i = 0; i < x.length; i++) x[i] += low[i] * 0.9; } // +5.6 dB low shelf below 260 Hz (the Q3 announcer's weight)
+  { const low = onePole(x, rate, 260); for (let i = 0; i < x.length; i++) x[i] += low[i] * 1.0; } // +6 dB low shelf below 260 Hz (the Q3 announcer's weight)
   x = saturate(normalize(x, 0.8), 1.7);     // a little grit, evenly for every line (more eats the consonants)
   x = reverb(x, rate, { wet: 0.22 });
   x = onePole(x, rate, 6500);               // vintage 22 kHz feel, consonants kept
@@ -142,5 +165,5 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   let total = 0;
   for (const n of names) { const r = processClip(n); manifest[n] = { file: `${n}.wav`, text: LINES[n], ms: r.ms }; total += fs.statSync(path.join(OUT, `${n}.wav`)).size; console.log(`${n.padEnd(14)} ${String(r.ms).padStart(5)} ms  "${LINES[n]}"`); }
   fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 1) + '\n');
-  console.log(`pack: ${names.length} clips, ${(total / 1024).toFixed(0)} KB, pitch ${PITCH}`);
+  console.log(`pack: ${names.length} clips, ${(total / 1024).toFixed(0)} KB, pitch ${PITCH}, stretch ${STRETCH}`);
 }
