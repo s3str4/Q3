@@ -154,11 +154,34 @@ test('duel flow: warmup -> countdown -> playing -> timelimit -> overtime sudden 
   assert.equal(g.match.state, 'ended'); assert.equal(g.match.winner, 2);
   const end = g.events.find((e) => e.type === EV.MATCH_END);
   assert.equal(end.scores[2].frags, 1);
-  // ended: no damage, then reset to warmup (and countdown again since 2 players are present)
+  // the final scoreboard travels in the event: per-weapon accuracy, damage, duration, mode/map
+  assert.equal(end.scores[2].byWeapon[WEAPONS.RAIL].hits, 1);
+  assert.equal(end.scores[2].name, 'b'); assert.equal(end.scores[2].dmg, 50); assert.equal(end.mode, 'duel'); assert.equal(end.map, 'testroom');
+  assert.ok(end.duration >= 3000 && end.duration < 4000, `duration ${end.duration}`); assert.equal(end.overtime, true); assert.equal(end.intermission, 30000);
+  // ended: no damage, then (30 s intermission, nobody voted) reset to warmup (and countdown again since 2 players are present)
   b.health = 100; g.damage(b, a, 50, [0, 1, 0], b.ps.origin, WEAPONS.RAIL, 0); assert.equal(b.health, 100);
-  stepGame(g, ticks(12100));
+  stepGame(g, ticks(29000));
+  assert.equal(g.match.state, 'ended', 'still on the end screen before the 30 s intermission is over');
+  stepGame(g, ticks(1100));
   assert.ok(g.match.state === 'warmup' || g.match.state === 'countdown', `reset: ${g.match.state}`);
-  assert.equal(a.frags, 0); assert.equal(b.frags, 0);
+  assert.equal(a.frags, 0); assert.equal(b.frags, 0); assert.deepEqual(b.shotsBy, {}); assert.deepEqual(b.hitsBy, {}); assert.equal(b.damageDealt, 0);
+});
+
+test('hold: no countdown starts while a client is still loading the map (duel warmup and arena waiting)', () => {
+  const g = new Game(roomMap(), { rules: { warmup: 100 } });
+  g.setHold(true);
+  g.addPlayer(1, 'a'); g.addPlayer(2, 'b');
+  stepGame(g, ticks(500));
+  assert.equal(g.match.state, 'warmup', 'held');
+  g.setHold(false);
+  stepGame(g, 1); assert.equal(g.match.state, 'countdown');
+  stepGame(g, ticks(200)); assert.equal(g.match.state, 'playing');
+  const ar = new Game(roomMap(), { mode: 'arena', rules: { roundCountdown: 100 } });
+  ar.setHold(true); ar.addPlayer(1, 'a'); ar.addPlayer(2, 'b');
+  stepGame(ar, ticks(500)); assert.equal(ar.match.state, 'waiting');
+  ar.setHold(false); stepGame(ar, 1); assert.equal(ar.match.state, 'playing'); assert.equal(ar.match.roundState, 'countdown');
+  // a reset keeps the hold (the session clears it when everyone has loaded)
+  ar.setHold(true); ar.resetMatch(); assert.equal(ar.match.hold, true);
 });
 
 test('duel: a leading player wins at the time limit; a disconnect mid-match leaves the match running', () => {
@@ -173,37 +196,89 @@ test('duel: a leading player wins at the time limit; a disconnect mid-match leav
   assert.equal(g.match.state, 'ended'); assert.equal(g.match.winner, 1);
 });
 
-test('arena mode: rounds with full loadout, frozen between rounds, first to a majority wins', () => {
-  const g = new Game(roomMap(), { mode: 'arena', rules: { rounds: 3, roundRest: 500, roundTimelimit: 60000 } });
+test('arena mode: 3-2-1 countdown with fresh spawns, full loadout, frozen between rounds, first to a majority wins', () => {
+  const g = new Game(roomMap(), { mode: 'arena', rules: { rounds: 3, roundRest: 500, roundCountdown: 3000, roundTimelimit: 60000 } });
   const a = g.addPlayer(1, 'a');
   assert.equal(g.match.state, 'waiting');
   const b = g.addPlayer(2, 'b');
-  stepGame(g, 1);
-  assert.equal(g.match.state, 'playing'); assert.equal(g.match.roundState, 'rest');
-  const ev = stepGame(g, ticks(1600));
+  let ev = stepGame(g, 1);
+  assert.equal(g.match.state, 'playing'); assert.equal(g.match.roundState, 'countdown'); assert.equal(g.match.startTime, g.time);
+  assert.ok(ev.some((e) => e.type === EV.COUNTDOWN && e.seconds === 3 && e.round === 1), 'countdown 3 announces round 1');
+  // frozen and invulnerable during the countdown, already carrying the arena loadout (a few ticks to settle the spawn)
+  stepGame(g, 5);
+  const o0 = [...a.ps.origin];
+  ev = stepGame(g, ticks(900), { 1: cmd({ forward: 127 }) });
+  assert.deepEqual(a.ps.origin.map(Math.round), o0.map(Math.round), 'frozen during the countdown');
+  a.health = 100; g.damage(a, b, 50, [0, 1, 0], a.ps.origin, WEAPONS.RAIL, 0); assert.equal(a.health, 100, 'no damage during the countdown');
+  ev = stepGame(g, ticks(2200));
   assert.equal(g.match.roundState, 'live'); assert.equal(g.match.round, 1);
-  assert.ok(ev.some((e) => e.type === EV.ROUND_START));
+  assert.ok(ev.some((e) => e.type === EV.COUNTDOWN && e.seconds === 2 && e.round === 1), 'countdown 2');
+  assert.ok(ev.some((e) => e.type === EV.COUNTDOWN && e.seconds === 1 && e.round === 1), 'countdown 1');
+  assert.ok(ev.some((e) => e.type === EV.ROUND_START && e.round === 1));
   assert.equal(a.health, 100); assert.equal(a.armor, 100); assert.ok(a.weapons & (1 << WEAPONS.ROCKET)); assert.ok(a.weapons & (1 << WEAPONS.RAIL));
-  // a kill ends the round
+  assert.equal(a.ammo[WEAPONS.RAIL], 15);
+  // live: players move; a kill ends the round
+  stepGame(g, 10, { 1: cmd({ forward: 127 }) });
+  assert.notDeepEqual(a.ps.origin.map(Math.round), o0.map(Math.round), 'moves once live');
   a.health = 1; g.damage(a, b, 50, [0, 1, 0], a.ps.origin, WEAPONS.RAIL, 0);
-  assert.equal(g.match.roundState, 'rest'); assert.equal(g.match.roundWins[2], 1);
-  assert.ok(g.events.some((e) => e.type === EV.ROUND_END && e.winner === 2));
-  // between rounds nobody moves or takes damage
+  assert.equal(g.match.roundState, 'rest'); assert.equal(g.match.roundWins[2], 1); assert.equal(a.dead, true);
+  const re = g.events.find((e) => e.type === EV.ROUND_END && e.winner === 2);
+  assert.ok(re); assert.deepEqual(re.wins, { 1: 0, 2: 1 });
+  // rest: the dead player stays dead (the result is on screen), the winner cannot move or take damage
   stepGame(g, 1);
   const o = [...b.ps.origin];
   stepGame(g, 10, { 2: cmd({ forward: 127 }) });
   assert.deepEqual(b.ps.origin.map((v) => Math.round(v)), o.map((v) => Math.round(v)), 'frozen during rest');
+  assert.equal(a.dead, true, 'still dead during the rest');
   b.health = 50; g.damage(b, a, 40, [0, 1, 0], b.ps.origin, WEAPONS.RAIL, 0); assert.equal(b.health, 50, 'no damage during rest');
-  stepGame(g, ticks(600));
-  assert.equal(g.match.round, 2); assert.equal(g.match.roundState, 'live'); assert.equal(a.dead, false);
+  // rest over -> countdown for round 2 with everyone respawned fresh
+  ev = stepGame(g, ticks(400));
+  assert.equal(g.match.roundState, 'countdown'); assert.equal(a.dead, false); assert.equal(a.health, 100); assert.equal(b.health, 100);
+  assert.ok(ev.some((e) => e.type === EV.COUNTDOWN && e.seconds === 3 && e.round === 2));
+  stepGame(g, ticks(3100));
+  assert.equal(g.match.round, 2); assert.equal(g.match.roundState, 'live');
   a.health = 1; g.damage(a, b, 50, [0, 1, 0], a.ps.origin, WEAPONS.RAIL, 0);
-  assert.equal(g.match.state, 'ended', '2 of 3 rounds wins'); assert.equal(g.match.winner, 2);
+  assert.equal(g.match.state, 'ended', '2 of 3 rounds wins'); assert.equal(g.match.winner, 2); assert.equal(g.match.roundState, 'idle');
+  const end = g.events.find((e) => e.type === EV.MATCH_END);
+  assert.equal(end.scores[2].rounds, 2); assert.equal(end.scores[1].rounds, 0); assert.equal(end.rounds, 2); assert.equal(end.mode, 'arena');
+  assert.equal(end.scores[2].frags, 2); assert.equal(end.scores[2].byWeapon[WEAPONS.RAIL].hits, 2);
+  // the end screen stays for the intermission, then the arena waits for the next match (players present -> countdown)
+  stepGame(g, ticks(29000)); assert.equal(g.match.state, 'ended');
+  stepGame(g, ticks(1100)); assert.equal(g.match.state, 'playing'); assert.equal(g.match.roundState, 'countdown'); assert.equal(g.match.round, 0);
+  assert.deepEqual(g.match.roundWins, { 1: 0, 2: 0 });
+});
+
+test('arena: 6 of 10 rounds wins; a draw (timeout with equal health+armor) counts for nobody', () => {
+  const g = new Game(roomMap(), { mode: 'arena', rules: { roundRest: 100, roundCountdown: 100, roundTimelimit: 500 } });
+  const a = g.addPlayer(1, 'a'), b = g.addPlayer(2, 'b');
+  let rounds = 0;
+  while (g.match.state !== 'ended' && rounds < 40) {
+    stepGame(g, ticks(250)); // countdown + rest
+    if (g.match.roundState !== 'live') { stepGame(g, ticks(200)); }
+    assert.equal(g.match.roundState, 'live');
+    rounds++;
+    if (rounds === 1) { stepGame(g, ticks(600)); assert.deepEqual(g.match.roundWins, { 1: 0, 2: 0 }, 'draw'); continue; }
+    a.health = 1; g.damage(a, b, 50, [0, 1, 0], a.ps.origin, WEAPONS.RAIL, 0);
+  }
+  assert.equal(g.match.state, 'ended'); assert.equal(g.match.winner, 2); assert.equal(g.match.roundWins[2], 6); assert.equal(g.match.round, 7);
+  // all rounds played without a majority (draws): the leader wins; a tie goes on (sudden death)
+  const g2 = new Game(roomMap(), { mode: 'arena', rules: { rounds: 3, roundRest: 100, roundCountdown: 100, roundTimelimit: 300 } });
+  const a2 = g2.addPlayer(1, 'a'); g2.addPlayer(2, 'b');
+  const untilLive = () => { for (let i = 0; i < 200 && g2.match.roundState !== 'live'; i++) stepGame(g2, 1); };
+  untilLive(); a2.armor = 150; stepGame(g2, ticks(350)); // round 1: a leads on health+armor at the timeout (arena spawn is 100/100)
+  assert.deepEqual(g2.match.roundWins, { 1: 1, 2: 0 });
+  untilLive(); stepGame(g2, ticks(350)); untilLive(); stepGame(g2, ticks(350)); // rounds 2 and 3: draws
+  assert.equal(g2.match.round, 3); assert.equal(g2.match.state, 'ended', 'leader wins after the last round'); assert.equal(g2.match.winner, 1);
+  const g3 = new Game(roomMap(), { mode: 'arena', rules: { rounds: 2, roundRest: 100, roundCountdown: 100, roundTimelimit: 300 } });
+  g3.addPlayer(1, 'a'); g3.addPlayer(2, 'b');
+  stepGame(g3, ticks(2500));
+  assert.equal(g3.match.state, 'playing', 'all draws: sudden death continues'); assert.ok(g3.match.round > 2);
 });
 
 test('arena round timeout: higher health+armor wins the round', () => {
-  const g = new Game(roomMap(), { mode: 'arena', rules: { rounds: 5, roundRest: 200, roundTimelimit: 1000 } });
+  const g = new Game(roomMap(), { mode: 'arena', rules: { rounds: 5, roundRest: 200, roundCountdown: 500, roundTimelimit: 1000 } });
   const a = g.addPlayer(1, 'a'), b = g.addPlayer(2, 'b');
-  stepGame(g, ticks(1600));
+  stepGame(g, ticks(600));
   assert.equal(g.match.roundState, 'live');
   a.armor = 50;
   stepGame(g, ticks(1100));

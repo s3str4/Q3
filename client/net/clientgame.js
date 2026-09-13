@@ -1,7 +1,7 @@
 // Client-side game state: prediction/reconciliation for the local player, snapshot interpolation for everything else.
-import { Game } from '../../shared/game.js';
+import { Game, newMatchState } from '../../shared/game.js';
 import { MSG, PROTOCOL_VERSION } from '../../shared/protocol.js';
-import { TICK_MS, TICK_RATE, EV, PM } from '../../shared/constants.js';
+import { TICK_MS, TICK_RATE, EV, PM, MATCH } from '../../shared/constants.js';
 import { copy, lerp, lerpAngle, dist } from '../../shared/vec3.js';
 import { PMF } from '../../shared/pmove.js';
 
@@ -25,6 +25,10 @@ export class ClientGame {
     this.onInfo = opts.onInfo || (() => {});
     this.onKick = opts.onKick || (() => {});
     this.onChat = opts.onChat || (() => {});
+    this.onVotes = opts.onVotes || (() => {});           // intermission state (votes, ready flags, next map, time left)
+    this.onMapChange = opts.onMapChange || (() => {});   // (msg) the server switched map/mode: load it, call setMap(), then sendLoaded()
+    this.onWelcome = opts.onWelcome || (() => {});
+    this.maps = null; this.mapName = map.name;
     this.predicted = null; // predicted local player state (ps + stats)
     this.misprediction = 0; this.corrections = 0; this.mispredMax = 0;
     this.lastSnapAt = 0; this.snapGaps = [];
@@ -48,6 +52,25 @@ export class ClientGame {
   }
   close() { clearInterval(this.pingTimer); clearInterval(this.joinTimer); this.transport.close(); }
   ping() { this.transport.send({ t: MSG.PING, c: performance.now(), rtt: Math.round(this.clock.rtt) }); }
+  // ---- intermission (end screen) ----
+  sendVote(v) { this.transport.send({ t: MSG.VOTE, ...(v.map != null ? { map: v.map } : {}), ...(v.mode != null ? { mode: v.mode } : {}) }); }
+  sendReady(ready = true) { this.transport.send({ t: MSG.REMATCH, ready: !!ready }); }
+  sendLoaded() { this.transport.send({ t: MSG.LOADED, map: this.mapName }); }
+
+  // Rebuild the local game for a new map / mode (after MAPCHANGE). Prediction, interpolation buffers and the clock
+  // samples restart from scratch: the server's new Game counts time from zero again and nothing from the old one
+  // is comparable. The next snapshot repopulates everything.
+  setMap(map, mode = this.game.mode, rules = this.rules) {
+    this.map = map; this.mapName = map.name;
+    this.game = new Game(map, { mode, isServer: false, lagComp: false });
+    if (rules) { this.rules = rules; this.game.rules = { ...this.game.rules, ...rules }; }
+    this.predicted = null; this.pending = []; this.snapshots = []; this.remote.clear(); this.remoteProjectiles = [];
+    this.latestSnap = null; this.pendingLocalEvents = []; this.errorOffset = null; this.stepSmooth = 0;
+    this.snapClock = []; this._snapClockDirty = true; this._snapClockSorted = [];
+    this.clock = { offset: 0, rtt: this.clock.rtt, samples: [], jitter: this.clock.jitter };
+    this.misprediction = 0; this.awaitingMap = null;
+    this.ping();
+  }
 
   // estimated current server time (NTP-style from pings; used for stats only)
   serverTime() { return performance.now() + this.clock.offset; }
@@ -69,8 +92,13 @@ export class ClientGame {
     switch (m.t) {
       case MSG.WELCOME:
         this.localId = m.id; this.snapRate = m.snapRate || 60; this.rules = m.rules; this.serverLagComp = m.lagComp;
-        this.game.mode = m.mode;
+        if (m.maps) this.maps = m.maps;
+        if (m.mode && m.mode !== this.game.mode) { this.game.mode = m.mode; this.game.rules = { ...MATCH[m.mode], ...(m.rules || {}) }; this.game.match = newMatchState(m.mode); }
+        else if (m.rules) this.game.rules = { ...this.game.rules, ...m.rules };
+        this.onWelcome(m);
         break;
+      case MSG.VOTES: this.votes = m; this.onVotes(m); break;
+      case MSG.MAPCHANGE: this.votes = null; this.awaitingMap = m.map; this.onMapChange(m); break; // snapshots of the new server game wait for setMap()
       case MSG.PONG: {
         const now = performance.now();
         const rtt = now - m.c;
@@ -85,7 +113,7 @@ export class ClientGame {
         this.clock.jitter = Math.sqrt(s.reduce((a, b) => a + (b.rtt - mean) ** 2, 0) / s.length);
         break;
       }
-      case MSG.SNAP: this.onSnapshot(m.s); break;
+      case MSG.SNAP: if (!this.awaitingMap) this.onSnapshot(m.s); break;
       case MSG.INFO: this.onInfo(m.info); break;
       case MSG.KICK: this.onKick(m.reason); break;
       case MSG.CHAT: this.onChat(m); break;
@@ -153,7 +181,7 @@ export class ClientGame {
 
   // Called at a fixed 60 Hz by the client loop with a fresh input sample.
   runCommand(input) {
-    if (!this.localId || !this.predicted) return null;
+    if (!this.localId || !this.predicted || this.awaitingMap) return null;
     const p = this.predicted;
     this.seq++;
     // vt: the server time whose remote positions we are showing right now (see renderTime); the server rewinds hitscan to it

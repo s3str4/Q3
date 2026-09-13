@@ -21,7 +21,7 @@ export function parseArgs(argv) {
     switch (k) {
       case '--port': a.port = +v; i++; break;
       case '--map': a.map = v; i++; break;
-      case '--mode': a.mode = v; i++; break;
+      case '--mode': a.mode = v === 'arena' ? 'arena' : 'duel'; i++; break;
       case '--bots': a.bots = +v; i++; break;
       case '--bot-skill': a.botSkill = +v; i++; break;
       case '--snap-rate': a.snapRate = +v; i++; break;
@@ -117,7 +117,7 @@ export async function createServer(opts) {
   log(`arena-duel server listening on http://${args.host === '0.0.0.0' ? 'localhost' : args.host}:${addr.port}  map=${args.map} mode=${args.mode} tick=${TICK_RATE}Hz snap=${TICK_RATE / session.snapEvery}Hz lagcomp=${args.lagComp}${args.latency || args.loss ? ` netsim=${args.latency}±${args.jitter}ms loss=${args.loss}%` : ''}`);
 
   return {
-    session, game: session.game, args, port: addr.port, httpServer,
+    session, get game() { return session.game; }, args, port: addr.port, httpServer, // game: a getter, the session rebuilds it on a map change
     // closeAllConnections: an idle HTTP keep-alive connection (e.g. from a /info fetch) would otherwise keep close() pending forever
     close: () => new Promise((r) => { clearInterval(timer); clearInterval(statsTimer); for (const ws of sockets) ws.terminate(); wss.close(); httpServer.close(() => r()); httpServer.closeAllConnections?.(); }),
   };

@@ -1,9 +1,14 @@
 // Wire protocol: JSON messages over WebSocket / DataChannel. Small, explicit, versioned.
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 export const PORT = 27960;
 
+// Client -> server: JOIN, CMD, PING, CHAT, VOTE (next map/mode pick during the intermission), REMATCH (ready toggle),
+// LOADED (the client finished loading the map named in MAPCHANGE / WELCOME and can take part in the countdown).
+// Server -> client: WELCOME, SNAP, PONG, CHAT, KICK, INFO, VOTES (live intermission state: everyone's pick, who is
+// ready, the resolved next map/mode and the auto-restart time), MAPCHANGE (rebuild the client game for map/mode X).
 export const MSG = {
-  JOIN: 'join', WELCOME: 'welcome', CMD: 'cmd', SNAP: 'snap', PING: 'ping', PONG: 'pong', CHAT: 'chat', KICK: 'kick', READY: 'ready', INFO: 'info',
+  JOIN: 'join', WELCOME: 'welcome', CMD: 'cmd', SNAP: 'snap', PING: 'ping', PONG: 'pong', CHAT: 'chat', KICK: 'kick', INFO: 'info',
+  VOTE: 'vote', REMATCH: 'rematch', LOADED: 'loaded', VOTES: 'votes', MAPCHANGE: 'mapchange',
 };
 
 export function encode(msg) { return JSON.stringify(msg); }

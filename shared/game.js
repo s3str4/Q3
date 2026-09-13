@@ -31,10 +31,12 @@ export class Game {
     this.time = 0; // ms
     this.events = [];
     this.items = map.items.map((it, i) => ({ index: i, type: it.type, def: ITEMS[it.type], origin: it.origin, available: true, respawnAt: 0 }));
-    this.match = { state: this.mode === 'arena' ? 'waiting' : 'warmup', startTime: 0, endTime: 0, winner: null, overtime: false, round: 0, roundState: 'idle', roundEndAt: 0, roundWins: {}, countdownAt: 0 };
+    this.match = newMatchState(this.mode);
     this.log = opts.log || (() => {});
     this.maxCmdsPerTick = opts.maxCmdsPerTick || 4;
   }
+  // hold: the session raises it after a map change until every client has loaded the map; no countdown starts meanwhile.
+  setHold(on) { this.match.hold = !!on; }
 
   // ---------- players ----------
   addPlayer(id, name, opts = {}) {
@@ -539,7 +541,7 @@ export class Game {
     const n = this.players.size;
     if (this.mode === 'duel') {
       if (m.state === 'warmup') {
-        if (n >= 2) { m.state = 'countdown'; m.countdownAt = this.time + this.rules.warmup; this.events.push({ type: EV.COUNTDOWN, seconds: Math.ceil(this.rules.warmup / 1000) }); }
+        if (n >= 2 && !m.hold) { m.state = 'countdown'; m.countdownAt = this.time + this.rules.warmup; m.lastCountdown = 0; this.events.push({ type: EV.COUNTDOWN, seconds: Math.ceil(this.rules.warmup / 1000) }); }
       } else if (m.state === 'countdown') {
         if (n < 2) { m.state = 'warmup'; return; }
         const left = m.countdownAt - this.time;
@@ -556,16 +558,26 @@ export class Game {
         }
         // one-minute / major-item warnings for the timer are client-side
       } else if (m.state === 'ended') {
-        if (this.time >= m.endTime + 12000) this.resetMatch();
+        if (this.time >= m.endTime + this.rules.intermission) this.resetMatch();
       }
     } else {
-      // arena: round based
+      // arena: round based. waiting -> playing { countdown (fresh spawns, 3-2-1) -> live -> over/rest }* -> ended
       if (m.state === 'waiting') {
-        if (n >= 2) { m.state = 'playing'; m.round = 0; m.roundWins = {}; for (const p of this.players.values()) m.roundWins[p.id] = 0; this.beginRoundRest(1500); }
+        if (n >= 2 && !m.hold) {
+          m.state = 'playing'; m.startTime = this.time; m.round = 0; m.roundWins = {};
+          for (const p of this.players.values()) { m.roundWins[p.id] = 0; resetStats(p); }
+          this.beginRoundCountdown();
+        }
       } else if (m.state === 'playing') {
-        if (n < 2) { m.state = 'waiting'; return; }
-        if (m.roundState === 'rest' && this.time >= m.roundEndAt) this.startRound();
-        else if (m.roundState === 'live') {
+        if (n < 2) { m.state = 'waiting'; m.roundState = 'idle'; return; }
+        if (m.roundState === 'rest') {
+          if (this.time >= m.roundEndAt) this.beginRoundCountdown();
+        } else if (m.roundState === 'countdown') {
+          const left = m.countdownAt - this.time;
+          const sec = Math.ceil(left / 1000);
+          if (sec !== m.lastCountdown && sec > 0) { m.lastCountdown = sec; this.events.push({ type: EV.COUNTDOWN, seconds: sec, round: m.round + 1 }); }
+          if (left <= 0) this.startRound();
+        } else if (m.roundState === 'live') {
           if (this.time - m.roundStart >= this.rules.roundTimelimit) {
             // timeout: higher health+armor wins, else draw
             const ps = [...this.players.values()];
@@ -575,7 +587,7 @@ export class Game {
           }
         }
       } else if (m.state === 'ended') {
-        if (this.time >= m.endTime + 12000) this.resetMatch();
+        if (this.time >= m.endTime + this.rules.intermission) this.resetMatch();
       }
     }
   }
@@ -583,25 +595,48 @@ export class Game {
     const m = this.match;
     m.state = 'playing'; m.startTime = this.time; m.overtime = false; m.winner = null;
     for (const it of this.items) { it.available = true; it.respawnAt = 0; }
-    for (const p of this.players.values()) { p.frags = 0; p.deaths = 0; p.damageDealt = 0; p.damageTaken = 0; p.hits = 0; p.shots = 0; this.spawnPlayer(p, true); }
+    for (const p of this.players.values()) { resetStats(p); this.spawnPlayer(p, true); }
     this.events.push({ type: EV.MATCH_START });
+  }
+  // Final scoreboard: everything the end screen shows (per-weapon accuracy included) travels in the event itself.
+  matchSummary() {
+    const m = this.match;
+    const scores = {};
+    for (const p of this.players.values()) {
+      const byWeapon = {};
+      for (const w of new Set([...Object.keys(p.shotsBy), ...Object.keys(p.hitsBy)])) byWeapon[w] = { shots: p.shotsBy[w] || 0, hits: p.hitsBy[w] || 0 };
+      scores[p.id] = { name: p.name, bot: !!p.isBot, frags: p.frags, deaths: p.deaths, dmg: p.damageDealt, dmgTaken: p.damageTaken, shots: p.shots, hits: p.hits, acc: p.shots ? p.hits / p.shots : 0, byWeapon, rounds: m.roundWins[p.id] || 0 };
+    }
+    return { winner: m.winner, scores, duration: Math.max(0, m.endTime - m.startTime), mode: this.mode, map: this.map.name, rounds: this.mode === 'arena' ? m.round : 0, overtime: !!m.overtime, intermission: this.rules.intermission };
   }
   endMatch(winner) {
     const m = this.match;
     if (m.state === 'ended') return;
     m.state = 'ended'; m.endTime = this.time; m.winner = winner ? winner.id : null;
-    this.events.push({ type: EV.MATCH_END, winner: m.winner, scores: Object.fromEntries([...this.players.values()].map((p) => [p.id, { frags: p.frags, deaths: p.deaths, dmg: p.damageDealt, acc: p.shots ? p.hits / p.shots : 0 }])) });
+    if (this.mode === 'arena') m.roundState = 'idle';
+    this.events.push({ type: EV.MATCH_END, ...this.matchSummary() });
   }
   resetMatch() {
-    this.match = { state: this.mode === 'arena' ? 'waiting' : 'warmup', startTime: 0, endTime: 0, winner: null, overtime: false, round: 0, roundState: 'idle', roundEndAt: 0, roundWins: {}, countdownAt: 0 };
-    for (const p of this.players.values()) { p.frags = 0; p.deaths = 0; this.spawnPlayer(p, true); }
+    const hold = !!this.match.hold;
+    this.match = newMatchState(this.mode);
+    this.match.hold = hold;
+    for (const p of this.players.values()) { resetStats(p); this.spawnPlayer(p, true); }
   }
   beginRoundRest(ms) { this.match.roundState = 'rest'; this.match.roundEndAt = this.time + ms; }
+  // Fresh spawns for everyone, frozen, with a 3-2-1 (COUNTDOWN events carry the upcoming round number for the banner).
+  beginRoundCountdown() {
+    const m = this.match;
+    m.roundState = 'countdown'; m.countdownAt = this.time + this.rules.roundCountdown;
+    for (const p of this.players.values()) this.spawnPlayer(p, true);
+    const sec = Math.ceil(this.rules.roundCountdown / 1000);
+    m.lastCountdown = sec;
+    if (sec > 0) this.events.push({ type: EV.COUNTDOWN, seconds: sec, round: m.round + 1 });
+  }
   startRound() {
     const m = this.match;
     m.round++; m.roundState = 'live'; m.roundStart = this.time;
-    for (const p of this.players.values()) this.spawnPlayer(p, true);
-    this.events.push({ type: EV.ROUND_START, round: m.round });
+    for (const p of this.players.values()) if (p.dead) this.spawnPlayer(p, true); // (already fresh from the countdown)
+    this.events.push({ type: EV.ROUND_START, round: m.round, wins: { ...m.roundWins } });
   }
   onArenaKill(target, attacker) {
     if (this.match.roundState !== 'live') return;
@@ -613,8 +648,12 @@ export class Game {
     m.roundState = 'over';
     if (winner) m.roundWins[winner.id] = (m.roundWins[winner.id] || 0) + 1;
     this.events.push({ type: EV.ROUND_END, round: m.round, winner: winner ? winner.id : null, wins: { ...m.roundWins } });
-    const need = Math.ceil(this.rules.rounds / 2) + 0; // first to majority (e.g. 6 of 10)
-    if (winner && m.roundWins[winner.id] >= Math.max(1, Math.floor(this.rules.rounds / 2) + 1)) { this.endMatch(winner); return; }
+    if (winner && m.roundWins[winner.id] >= Math.max(1, Math.floor(this.rules.rounds / 2) + 1)) { this.endMatch(winner); return; } // first to a majority (6 of 10)
+    // all rounds played (draws do not count for anyone): the leader wins; a tie goes to sudden death (more rounds)
+    if (m.round >= this.rules.rounds) {
+      const ps = [...this.players.values()].sort((a, b) => (m.roundWins[b.id] || 0) - (m.roundWins[a.id] || 0));
+      if (ps.length >= 2 && (m.roundWins[ps[0].id] || 0) > (m.roundWins[ps[1].id] || 0)) { this.endMatch(ps[0]); return; }
+    }
     this.beginRoundRest(this.rules.roundRest);
   }
 
@@ -660,6 +699,13 @@ export class Game {
   }
 }
 
+export function newMatchState(mode) {
+  return { state: mode === 'arena' ? 'waiting' : 'warmup', startTime: 0, endTime: 0, winner: null, overtime: false, round: 0, roundState: 'idle', roundEndAt: 0, roundWins: {}, countdownAt: 0, lastCountdown: 0, hold: false };
+}
+// Every per-match statistic a player carries (the end screen reads them from the MATCH_END event).
+export function resetStats(p) {
+  p.frags = 0; p.deaths = 0; p.damageDealt = 0; p.damageTaken = 0; p.hits = 0; p.shots = 0; p.shotsBy = {}; p.hitsBy = {}; p.lastHitTick = {};
+}
 export function boxesOverlap(o1, mn1, mx1, o2, mn2, mx2) {
   for (let i = 0; i < 3; i++) if (o1[i] + mx1[i] < o2[i] + mn2[i] || o1[i] + mn1[i] > o2[i] + mx2[i]) return false;
   return true;

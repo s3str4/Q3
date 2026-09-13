@@ -3,8 +3,9 @@ import { GameSession, loopbackPair } from '../../shared/session.js';
 import { RtcTransport, PeerTransport } from './transport.js';
 
 export class BrowserHost {
+  // opts: mode 'duel' | 'arena', rules (match rule overrides, e.g. shorter rounds for automation), snapRate, log
   constructor(map, opts = {}) {
-    this.session = new GameSession(map, { mode: opts.mode || 'duel', snapRate: opts.snapRate || 60, lagComp: true, log: opts.log || (() => {}) });
+    this.session = new GameSession(map, { mode: opts.mode || 'duel', snapRate: opts.snapRate || 60, lagComp: true, rules: opts.rules || {}, log: opts.log || (() => {}) });
     this.timer = setInterval(() => this.session.frame(performance.now()), 4);
     this.peers = [];
   }

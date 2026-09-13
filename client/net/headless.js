@@ -9,16 +9,23 @@
 import { ClientGame } from './clientgame.js';
 import { WsTransport } from './transport.js';
 import { TICK_MS } from '../../shared/constants.js';
+import { loadMap } from '../../shared/map.js';
 
 const EMPTY = { forward: 0, right: 0, up: 0, buttons: 0, pitch: 0, yaw: 0, weapon: 0 };
 
-export async function connectHeadless({ url, map, name = 'headless', script = null, mode = 'duel', bot = false, botSkill = 0.6, interpSnaps = 2, onEvent = null }) {
+// A MAPCHANGE from the server is followed like the browser does it: load the map module, rebuild the client game,
+// then tell the server we are LOADED (set autoLoad: false to drive that by hand, e.g. to test the countdown hold).
+export async function connectHeadless({ url, map, name = 'headless', script = null, mode = 'duel', bot = false, botSkill = 0.6, interpSnaps = 2, onEvent = null, autoLoad = true }) {
   const transport = new WsTransport(url);
   await transport.connect();
   const events = [];
+  const votes = [];
+  const mapChanges = [];
   const cg = new ClientGame(map, transport, { mode, name, interpSnaps, onEvent: (e, predicted) => { events.push({ ...e, predicted, at: cg.game.time }); if (onEvent) onEvent(e, predicted); } });
   let kicked = null; let closed = false;
   cg.onKick = (r) => { kicked = r; };
+  cg.onVotes = (v) => votes.push(v);
+  cg.onMapChange = (m) => { mapChanges.push(m); if (autoLoad) handle.load(m); };
   transport.onclose = () => { closed = true; };
   cg.join({ bot, botSkill });
   const t0 = performance.now();
@@ -40,7 +47,12 @@ export async function connectHeadless({ url, map, name = 'headless', script = nu
     cg.interpolate();
   }, 4);
   const handle = {
-    cg, transport, events, yawState,
+    cg, transport, events, yawState, votes, mapChanges,
+    get lastVotes() { return votes.length ? votes[votes.length - 1] : null; },
+    // follow a MAPCHANGE message: load, rebuild, report LOADED
+    async load(m) { const nm = await loadMap(m.map); cg.setMap(nm, m.mode, m.rules); cg.sendLoaded(); return nm; },
+    vote(v) { cg.sendVote(v); },
+    ready(r = true) { cg.sendReady(r); },
     get id() { return cg.localId; },
     get player() { return cg.predicted; },
     get kicked() { return kicked; },

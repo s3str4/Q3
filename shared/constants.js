@@ -75,10 +75,14 @@ export const ITEMS = {
 // Q3 item bbox is 30x30x30 around origin (ITEM_RADIUS 15), and picks up when the player box touches it.
 export const ITEM_HALF = 15;
 
+// intermission: how long the end screen stays up before the next match starts by itself (same map) when nobody votes.
+// Arena rounds: roundRest shows the round result (players frozen), then roundCountdown (fresh spawns, 3-2-1) before live.
 export const MATCH = {
-  duel: { timelimit: 10 * 60 * 1000, fraglimit: 0, respawnMin: 1700, respawnForce: 5000, warmup: 3000 },
-  arena: { rounds: 10, roundTimelimit: 90 * 1000, respawnMin: 0, respawnForce: 0, roundRest: 3000, warmup: 3000 },
+  duel: { timelimit: 10 * 60 * 1000, fraglimit: 0, respawnMin: 1700, respawnForce: 5000, warmup: 3000, intermission: 30000 },
+  arena: { rounds: 10, roundTimelimit: 90 * 1000, respawnMin: 0, respawnForce: 0, roundRest: 2000, roundCountdown: 3000, warmup: 3000, intermission: 30000 },
 };
+// Practice bot difficulty tiers (menu labels -> Bot skill)
+export const BOT_TIERS = { easy: 0.3, normal: 0.6, hard: 0.8, pro: 0.95 };
 
 export const BUTTONS = { ATTACK: 1, JUMP: 2, CROUCH: 4, ZOOM: 8 };
 

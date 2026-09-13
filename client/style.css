@@ -57,8 +57,13 @@ html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-f
 .scorebox .score { font-family: var(--num); font-stretch: condensed; font-size: 40px; font-weight: 700; line-height: 0.95; font-variant-numeric: tabular-nums; }
 .scorebox.me .score { color: var(--blue); } .scorebox.them .score { color: var(--red); }
 .scorebox .pname { font-size: 11px; letter-spacing: 2px; opacity: 0.85; margin-top: 3px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#timer { font-family: var(--num); font-stretch: condensed; font-size: 40px; font-weight: 700; letter-spacing: 1px; font-variant-numeric: tabular-nums; min-width: 120px; text-align: center; padding: 4px 8px; background: rgba(0,0,0,0.5); border-radius: 3px; line-height: 1.2; }
+#timer-box { display: flex; flex-direction: column; align-items: center; min-width: 120px; padding: 4px 8px; background: rgba(0,0,0,0.5); border-radius: 3px; }
+#timer { font-family: var(--num); font-stretch: condensed; font-size: 40px; font-weight: 700; letter-spacing: 1px; font-variant-numeric: tabular-nums; text-align: center; line-height: 1.2; }
 #timer.late { color: var(--accent); }
+#timer-sub { font-size: 11px; letter-spacing: 2px; opacity: 0.85; margin-top: -2px; min-height: 13px; white-space: nowrap; }
+#timer-sub:empty { display: none; }
+/* arena: no pickups, so no item timers */
+#hud.arena #item-timers { display: none; }
 /* messages */
 #pickup-msg { position: absolute; top: 19%; width: 100%; text-align: center; font-family: var(--num); font-stretch: condensed; font-size: 26px; font-weight: 600; letter-spacing: 3px; color: #fff; opacity: 0; text-shadow: 0 0 8px #000, 0 0 18px rgba(255,255,255,0.4); transition: opacity 150ms; }
 #center-msg { position: absolute; top: 33%; width: 100%; text-align: center; font-family: var(--num); font-stretch: condensed; font-size: 60px; font-weight: 700; letter-spacing: 8px; color: #fff; text-shadow: 0 0 14px #000, 0 0 30px var(--accent); opacity: 0; transition: opacity 200ms; }
@@ -84,6 +89,31 @@ html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-f
 #scoreboard { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%); min-width: 560px; background: rgba(10,12,20,0.92); border: 1px solid #3a4560; border-radius: 6px; padding: 18px 26px; font-size: 16px; }
 #scoreboard table { width: 100%; border-collapse: collapse; } #scoreboard th { text-align: left; font-size: 11px; letter-spacing: 2px; opacity: 0.6; padding: 4px 8px; } #scoreboard td { padding: 8px; border-top: 1px solid #2a3040; font-variant-numeric: tabular-nums; font-family: var(--num); font-stretch: condensed; font-size: 18px; }
 #scoreboard h2 { margin: 0 0 8px; letter-spacing: 4px; font-size: 20px; font-family: var(--num); font-stretch: condensed; }
+/* end of match screen (over the HUD, needs the mouse: pointer lock is released while it is up) */
+#endscreen { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(3,5,10,0.55); z-index: 5; }
+.es-panel { width: 720px; max-width: 96vw; max-height: 94vh; overflow: auto; background: rgba(10,12,20,0.94); border: 1px solid #3a4560; border-radius: 8px; padding: 20px 28px 22px; box-shadow: 0 30px 80px rgba(0,0,0,0.7); animation: fadein 250ms ease-out; }
+#es-banner { font-family: var(--num); font-stretch: condensed; font-size: 54px; font-weight: 900; letter-spacing: 8px; text-align: center; line-height: 1; color: #fff; text-shadow: 0 0 24px var(--accent); }
+#es-banner.win { color: var(--green); text-shadow: 0 0 24px rgba(123,255,138,0.6); } #es-banner.lose { color: var(--red); text-shadow: 0 0 24px rgba(255,74,74,0.6); }
+#es-sub { text-align: center; font-size: 12px; letter-spacing: 3px; opacity: 0.7; margin: 8px 0 14px; }
+.es-tablewrap { overflow-x: auto; }
+#es-table { width: 100%; border-collapse: collapse; font-family: var(--num); font-stretch: condensed; font-variant-numeric: tabular-nums; }
+#es-table th { text-align: right; font-size: 10px; letter-spacing: 2px; opacity: 0.6; padding: 4px 8px; font-family: "Segoe UI", Roboto, sans-serif; white-space: nowrap; }
+#es-table td { text-align: right; padding: 7px 8px; border-top: 1px solid #2a3040; font-size: 18px; white-space: nowrap; }
+#es-table th:first-child, #es-table td:first-child { text-align: left; }
+#es-table td.w { font-size: 14px; opacity: 0.85; } #es-table td.w small { opacity: 0.6; font-size: 11px; margin-left: 3px; }
+#es-table tr.winner td:first-child { color: var(--accent); } #es-table tr.me td:first-child { font-weight: 700; }
+#es-table tr.winner td:first-child::before { content: "\2605  "; font-size: 13px; }
+.es-next { margin-top: 16px; border-top: 1px solid #2a3040; padding-top: 12px; }
+.es-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.es-row label { display: flex; align-items: center; gap: 8px; font-size: 12px; letter-spacing: 1px; }
+.es-row select { background: #0a0d14; border: 1px solid #2c3648; color: #fff; padding: 7px 8px; border-radius: 4px; font-size: 13px; letter-spacing: 1px; }
+.es-row button { flex: 0 0 auto; padding: 9px 18px; }
+#es-rematch.ready { background: var(--green); border-color: #b8ffc0; color: #06200a; }
+#es-votes { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; font-size: 13px; }
+#es-votes .v { display: flex; gap: 10px; align-items: center; background: rgba(0,0,0,0.35); padding: 5px 10px; border-radius: 3px; border-left: 3px solid #3a4560; }
+#es-votes .v.ready { border-left-color: var(--green); } #es-votes .v .n { min-width: 140px; font-weight: 700; letter-spacing: 1px; } #es-votes .v .p { flex: 1; opacity: 0.85; } #es-votes .v .r { font-size: 11px; letter-spacing: 2px; opacity: 0.6; } #es-votes .v.ready .r { color: var(--green); opacity: 1; }
+#es-votes .next { margin-top: 4px; font-size: 12px; letter-spacing: 2px; color: var(--accent); }
+#es-auto { margin-top: 8px; font-size: 11px; letter-spacing: 2px; opacity: 0.6; text-align: right; }
 /* menu */
 #menu { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: radial-gradient(ellipse at 50% 30%, #1b2233 0%, #05070c 70%); }
 .panel { width: 460px; background: rgba(12,16,26,0.96); border: 1px solid #2c3648; border-radius: 8px; padding: 26px 30px; box-shadow: 0 30px 80px rgba(0,0,0,0.7); }

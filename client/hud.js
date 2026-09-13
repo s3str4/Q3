@@ -2,8 +2,12 @@
 // with weapon colour chips, item timers, net graph (frame-time bars + ping), damage-direction arcs, screen flashes,
 // scoreboard. Cheap by design: text nodes are only touched when a value changes.
 import { WEAPON_DEFS, WEAPON_ORDER, WEAPONS, ITEMS, EV } from '../shared/constants.js';
+import { MAPS } from '../maps/index.js';
 
 const $ = (id) => document.getElementById(id);
+const MODE_TITLE = { duel: 'Duel', arena: 'Arena' };
+const mapTitle = (id) => (MAPS.find((m) => m.id === id) || {}).title || id;
+const WSHORT = { [WEAPONS.GAUNTLET]: 'GA', [WEAPONS.MACHINEGUN]: 'MG', [WEAPONS.SHOTGUN]: 'SG', [WEAPONS.ROCKET]: 'RL', [WEAPONS.LIGHTNING]: 'LG', [WEAPONS.RAIL]: 'RG', [WEAPONS.PLASMA]: 'PG' };
 const KEYS = { [WEAPONS.GAUNTLET]: 1, [WEAPONS.MACHINEGUN]: 2, [WEAPONS.SHOTGUN]: 3, [WEAPONS.ROCKET]: 4, [WEAPONS.LIGHTNING]: 5, [WEAPONS.RAIL]: 6, [WEAPONS.PLASMA]: 7 };
 const SHORT = { [WEAPONS.GAUNTLET]: 'GAUNTLET', [WEAPONS.MACHINEGUN]: 'MACHINEGUN', [WEAPONS.SHOTGUN]: 'SHOTGUN', [WEAPONS.ROCKET]: 'ROCKETS', [WEAPONS.LIGHTNING]: 'LIGHTNING', [WEAPONS.RAIL]: 'RAILGUN', [WEAPONS.PLASMA]: 'PLASMA' };
 const WCOL = { [WEAPONS.ROCKET]: '#ff6a3a', [WEAPONS.RAIL]: '#5cff9d', [WEAPONS.LIGHTNING]: '#bfe8ff', [WEAPONS.SHOTGUN]: '#ffc86a', [WEAPONS.PLASMA]: '#b26cff', [WEAPONS.MACHINEGUN]: '#ffe680', [WEAPONS.GAUNTLET]: '#ff9a5c' };
@@ -27,10 +31,19 @@ export class Hud {
     this.majorItems = []; this.itemRows = [];
     this.ng = $('ng-canvas').getContext('2d');
     this.cache = {}; this.dirIdx = 0; this.viewYaw = 0;
+    // end screen: callbacks are set by main.js (they talk to the ClientGame)
+    this.onVote = () => {}; this.onReady = () => {}; this.onLeave = () => {};
+    this.es = $('endscreen'); this.esReady = false; this.esVotes = null; this.esVotesAt = 0; this.endTimer = null;
+    for (const mp of MAPS) { const o = document.createElement('option'); o.value = mp.id; o.textContent = mp.title; $('es-map').appendChild(o); }
+    $('es-map').onchange = (e) => this.onVote({ map: e.target.value });
+    $('es-mode').onchange = (e) => this.onVote({ mode: e.target.value });
+    $('es-rematch').onclick = () => this.setReady(!this.esReady);
+    $('es-leave').onclick = () => this.onLeave();
   }
   show() { this.el.classList.remove('hidden'); }
-  hide() { this.el.classList.add('hidden'); }
+  hide() { this.el.classList.add('hidden'); this.hideEnd(); }
   setMap(map) {
+    this.mapName = map.name;
     this.majorItems = map.items.map((it, i) => ({ i, type: it.type, def: ITEMS[it.type] })).filter((x) => x.def.major && x.def.kind !== 'weapon');
     this.itemTimersEl.innerHTML = '';
     this.itemRows = this.majorItems.map((mi) => {
@@ -74,17 +87,28 @@ export class Hud {
     this.set('score-me', me ? me.f : 0); this.set('score-them', them ? them.f : '-');
     this.set('name-me', me ? me.n : ''); this.set('name-them', them ? them.n : 'waiting...');
     const m = cg.game.match;
-    let timerText = '';
-    if (m.state === 'playing' && cg.game.mode === 'duel') {
+    const arena = cg.game.mode === 'arena';
+    if (this.cache.arena !== arena) { this.cache.arena = arena; this.el.classList.toggle('arena', arena); }
+    let timerText = '', sub = '';
+    if (m.hold) timerText = 'LOADING';
+    else if (m.state === 'playing' && !arena) {
       const limit = cg.rules ? cg.rules.timelimit : 600000;
       const left = m.overtime ? 0 : Math.max(0, limit - (cg.serverTime() - m.startTime));
-      timerText = m.overtime ? 'OT' : fmt(left);
+      timerText = m.overtime ? 'OT' : fmt(left); sub = m.overtime ? 'SUDDEN DEATH' : '';
       $('timer').classList.toggle('late', left < 60000 && !m.overtime);
+    } else if (m.state === 'playing' && arena) {
+      // arena: the running round score lives in the timer slot, the round clock underneath
+      const w = m.roundWins || {};
+      timerText = `${w[cg.localId] || 0} - ${them ? (w[them.id] || 0) : 0}`;
+      const need = Math.floor((cg.rules ? cg.rules.rounds : 10) / 2) + 1;
+      if (m.roundState === 'countdown') sub = `ROUND ${(m.round || 0) + 1} · FIRST TO ${need}`;
+      else if (m.roundState === 'live') { const left = Math.max(0, (cg.rules ? cg.rules.roundTimelimit : 90000) - (cg.serverTime() - m.roundStart)); sub = `ROUND ${m.round} · ${fmt(left)}`; $('timer').classList.toggle('late', left < 10000); }
+      else sub = `ROUND ${m.round || 0} · FIRST TO ${need}`;
     } else if (m.state === 'countdown') timerText = 'READY';
-    else if (m.state === 'warmup') timerText = 'WARMUP';
-    else if (m.state === 'ended') timerText = 'FINAL';
-    else if (cg.game.mode === 'arena') { const w = m.roundWins || {}; timerText = `R${m.round || 0} ${w[cg.localId] || 0}-${them ? (w[them.id] || 0) : 0}`; }
-    this.set('timer', timerText);
+    else if (m.state === 'warmup' || m.state === 'waiting') { timerText = 'WARMUP'; sub = them ? '' : 'WAITING FOR OPPONENT'; }
+    else if (m.state === 'ended') { timerText = 'FINAL'; if (arena) { const w = m.roundWins || {}; sub = `${w[cg.localId] || 0} - ${them ? (w[them.id] || 0) : 0}`; } }
+    this.set('timer', timerText); this.set('timer-sub', sub);
+    if (!this.es.classList.contains('hidden')) this.updateEndCountdown();
     // speed & net graph
     const v = view.velocity; this.set('speedometer', Math.round(Math.hypot(v[0], v[1])) + ' ups');
     this.drawNetGraph(cg, now);
@@ -136,13 +160,77 @@ export class Hud {
         const html = e.attacker && e.attacker !== e.id ? `<span class="wi"></span>${victim} ${MOD_TEXT[e.mod] || 'was killed by'} <span class="${mine(e.attacker) ? 'me' : 'them'}">${esc(nm(e.attacker))}</span>` : `${victim} ${e.mod === 'fall' ? 'cratered' : e.mod === 'lava' ? 'was burned to a crisp' : 'blew themselves up'}`;
         this.obituary(html, WCOL[e.mod] || '#ff4a4a');
         if (e.id === cg.localId) this.center('YOU DIED', 1600, e.attacker && e.attacker !== e.id ? `killed by ${nm(e.attacker)}` : ''); else if (e.attacker === cg.localId) this.center('FRAG', 700, nm(e.id)); break; }
-      case EV.COUNTDOWN: this.center(e.seconds > 0 ? String(e.seconds) : 'FIGHT', 900); break;
-      case EV.MATCH_START: this.center('FIGHT!', 1200); break;
-      case EV.MATCH_END: { const win = e.winner === cg.localId; this.center(e.winner == null ? 'DRAW' : win ? 'YOU WIN' : 'YOU LOSE', 6000); break; }
-      case EV.ROUND_START: this.center(`ROUND ${e.round}`, 1000); break;
-      case EV.ROUND_END: this.center(e.winner === cg.localId ? 'ROUND WON' : e.winner == null ? 'ROUND DRAW' : 'ROUND LOST', 1800); break;
+      case EV.COUNTDOWN: this.hideEnd(); this.center(e.seconds > 0 ? String(e.seconds) : 'FIGHT', 900, e.round ? `ROUND ${e.round}` : ''); break;
+      case EV.MATCH_START: this.hideEnd(); this.center('FIGHT!', 1200); break;
+      case EV.MATCH_END: {
+        const win = e.winner === cg.localId;
+        this.center(e.winner == null ? 'DRAW' : win ? 'YOU WIN' : 'YOU LOSE', 1400);
+        clearTimeout(this.endTimer); this.endTimer = setTimeout(() => this.showEnd(e, cg), 1200); // let the last frag / fanfare land first
+        break;
+      }
+      case EV.ROUND_START: this.center('FIGHT!', 1000, `ROUND ${e.round}`); break;
+      case EV.ROUND_END: { const w = e.wins || {}; const mine = w[cg.localId] || 0; const theirs = Object.entries(w).filter(([id]) => +id !== cg.localId).reduce((s, [, n]) => s + n, 0);
+        this.center(e.winner === cg.localId ? 'ROUND WON' : e.winner == null ? 'ROUND DRAW' : 'ROUND LOST', 1800, `${mine} - ${theirs}`); break; }
       case EV.MAJOR_WARN: this.center(e.text, 2500); break;
     }
+  }
+  // ---- end of match screen ----
+  showEnd(e, cg) {
+    const es = this.es;
+    const me = cg.localId;
+    const banner = $('es-banner');
+    banner.textContent = e.winner == null ? 'DRAW' : e.winner === me ? 'YOU WIN' : 'YOU LOSE';
+    banner.className = e.winner == null ? '' : e.winner === me ? 'win' : 'lose';
+    const dur = fmt(e.duration || 0);
+    $('es-sub').textContent = `${mapTitle(e.map || this.mapName).toUpperCase()} · ${(MODE_TITLE[e.mode] || e.mode || '').toUpperCase()} · ${dur}${e.overtime ? ' (OT)' : ''}${e.mode === 'arena' ? ` · ${e.rounds} ROUNDS` : ''}`;
+    const ids = Object.keys(e.scores || {}).map(Number).sort((a, b) => (e.scores[b].frags - e.scores[a].frags) || (e.scores[b].rounds - e.scores[a].rounds));
+    const usedW = WEAPON_ORDER.filter((w) => ids.some((id) => (e.scores[id].byWeapon || {})[w]));
+    const pct = (h, s) => (s ? Math.round(100 * h / s) : 0);
+    const head = `<tr><th>PLAYER</th>${e.mode === 'arena' ? '<th>ROUNDS</th>' : ''}<th>FRAGS</th><th>DEATHS</th><th>DMG</th><th>ACC</th>${usedW.map((w) => `<th title="${WEAPON_DEFS[w].name}">${WSHORT[w]}</th>`).join('')}</tr>`;
+    const rows = ids.map((id) => { const s = e.scores[id]; const cls = [id === e.winner ? 'winner' : '', id === me ? 'me' : ''].join(' ').trim();
+      const wcells = usedW.map((w) => { const b = (s.byWeapon || {})[w]; return b ? `<td class="w">${pct(b.hits, b.shots)}%<small>${b.hits}/${b.shots}</small></td>` : '<td class="w">-</td>'; }).join('');
+      return `<tr class="${cls}"><td>${esc(s.name)}${s.bot ? ' (bot)' : ''}</td>${e.mode === 'arena' ? `<td>${s.rounds}</td>` : ''}<td>${s.frags}</td><td>${s.deaths}</td><td>${s.dmg}</td><td>${pct(s.hits, s.shots)}%</td>${wcells}</tr>`; }).join('');
+    $('es-table').innerHTML = head + rows;
+    // next match controls start from the current map / mode; the selects only send a vote when the player changes them
+    const allowed = cg.maps || MAPS.map((m) => m.id);
+    for (const o of $('es-map').options) o.disabled = !allowed.includes(o.value);
+    $('es-map').value = e.map || this.mapName; $('es-mode').value = e.mode || cg.game.mode;
+    this.setReady(false, false);
+    this.esVotes = cg.votes || null; this.esVotesAt = performance.now();
+    this.renderVotes(cg);
+    es.classList.remove('hidden');
+    try { if (document.pointerLockElement) document.exitPointerLock(); } catch {}
+  }
+  hideEnd() { clearTimeout(this.endTimer); if (!this.es.classList.contains('hidden')) { this.es.classList.add('hidden'); this.esVotes = null; } }
+  get endVisible() { return !this.es.classList.contains('hidden'); }
+  setReady(ready, send = true) {
+    this.esReady = ready;
+    const b = $('es-rematch'); b.classList.toggle('ready', ready); b.textContent = ready ? 'READY - CLICK TO CANCEL' : 'REMATCH';
+    if (send) this.onReady(ready);
+  }
+  // live vote state from the server (VOTES message)
+  votes(v, cg) {
+    this.esVotes = v; this.esVotesAt = performance.now();
+    if (v && v.players && v.players[cg.localId]) { const mine = v.players[cg.localId]; if (mine.ready !== this.esReady) this.setReady(!!mine.ready, false); }
+    if (this.endVisible) this.renderVotes(cg);
+  }
+  renderVotes(cg) {
+    const v = this.esVotes;
+    const el = $('es-votes');
+    if (!v || !v.players) { el.innerHTML = ''; $('es-auto').textContent = ''; return; }
+    const rows = Object.entries(v.players).map(([id, p]) => {
+      const pick = p.bot ? 'any map' : (p.map || p.mode) ? `${p.map ? mapTitle(p.map) : 'same map'} · ${p.mode ? MODE_TITLE[p.mode] : 'same mode'}` : 'no vote';
+      return `<div class="v${p.ready ? ' ready' : ''}"><span class="n">${esc(p.name)}${+id === cg.localId ? ' (you)' : p.bot ? ' (bot)' : ''}</span><span class="p">${esc(pick)}</span><span class="r">${p.ready ? 'READY' : 'NOT READY'}</span></div>`;
+    }).join('');
+    const next = v.next || {};
+    el.innerHTML = rows + `<div class="next">NEXT: ${esc(mapTitle(next.map || this.mapName))} · ${esc((MODE_TITLE[next.mode] || next.mode || '').toUpperCase())}${(next.map && next.map !== this.mapName) ? ' (map change)' : ''}</div>`;
+    this.updateEndCountdown(true);
+  }
+  updateEndCountdown(force = false) {
+    const v = this.esVotes; if (!v) return;
+    const left = Math.max(0, (v.left || 0) - (performance.now() - this.esVotesAt));
+    const s = Math.ceil(left / 1000);
+    if (force || s !== this.cache.esAuto) { this.cache.esAuto = s; $('es-auto').textContent = v.open ? `both players ready starts the next match now · otherwise it starts in ${s} s` : 'starting...'; }
   }
   pickup(text) { const el = $('pickup-msg'); el.textContent = text.toUpperCase(); el.style.opacity = 1; clearTimeout(this.pickupTimer); this.pickupTimer = setTimeout(() => (el.style.opacity = 0), 900); }
   center(text, ms, sub = '') { const el = $('center-msg'); el.innerHTML = esc(text) + (sub ? `<span class="sub">${esc(sub)}</span>` : ''); el.style.opacity = 1; clearTimeout(this.centerTimer); this.centerTimer = setTimeout(() => (el.style.opacity = 0), ms); }

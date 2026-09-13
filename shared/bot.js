@@ -27,14 +27,19 @@ export class Bot {
     this.rng = makeRng(opts.seed ?? 1);
     this.seq = 0;
     this.yaw = player.ps.viewangles[1]; this.pitch = 0;
-    // skill-derived parameters
-    this.reaction = 420 - 320 * s;        // ms from first sight to first shot
-    this.aimError = 7.5 - 5 * s;          // deg amplitude of the wandering aim offset (perception + motor error)
-    this.dodgeChance = 0.15 + 0.45 * s;   // chance to react to an incoming rocket at all
-    this.turnRate = 0.14 + 0.36 * s;      // fraction of the remaining angle closed per tick (tracking lag on a strafing target)
-    this.maxTurn = 9 + 26 * s;            // deg per tick cap (mouse speed)
-    this.leadQuality = 0.45 + 0.55 * s;   // fraction of ideal projectile lead
-    this.trackLag = 0.03 + 0.12 * (1 - s); // s: the crosshair trails a strafing target (the main human miss source)
+    // skill-derived parameters. The menu tiers are Easy 0.3 / Normal 0.6 / Hard 0.8 / Pro 0.95 (BOT_TIERS):
+    //   reaction  420 / 300 / 220 / 160 ms      aim error 6.6 / 4.2 / 2.6 / 1.4 deg      rail tolerance +1.4 / +0.8 / +0.4 / +0.1 deg
+    //   dodge     25 / 55 / 75 / 90 %           strafe flips every 1.2-2.4 / 0.75-1.6 / 0.55-1.25 / 0.4-1.0 s, jumps 1 / 2 / 3 / 4 %/tick
+    this.reaction = 540 - 400 * s;        // ms from first sight to first shot
+    this.aimError = 9 - 8 * s;            // deg amplitude of the wandering aim offset (perception + motor error)
+    this.dodgeChance = 0.05 + 0.9 * s;    // chance to react to an incoming rocket at all
+    this.turnRate = 0.12 + 0.4 * s;       // fraction of the remaining angle closed per tick (tracking lag on a strafing target)
+    this.maxTurn = 8 + 28 * s;            // deg per tick cap (mouse speed)
+    this.leadQuality = 0.4 + 0.6 * s;     // fraction of ideal projectile lead
+    this.trackLag = 0.02 + 0.14 * (1 - s); // s: the crosshair trails a strafing target (the main human miss source)
+    this.railSlack = 2 * (1 - s) * (1 - s); // deg added to the rail trigger tolerance (a Pro waits for a settled crosshair)
+    this.strafeBase = 300 + 900 * (1 - s); this.strafeSpread = 600 + 600 * (1 - s); // ms between strafe direction changes
+    this.jumpChance = 0.006 + 0.04 * s;   // per-tick chance to hop while strafing (more when hurt)
     this.favorite = [W.ROCKET, W.LIGHTNING, W.RAIL][Math.floor(this.rng() * 3)]; // personality
     // state
     this.goal = null; this.goalItem = null; this.path = []; this.pathIdx = 0; this.repathAt = 0; this.campUntil = 0;
@@ -169,7 +174,7 @@ export class Bot {
     if (!inRange) return false;
     // rockets at long range against a moving target are wasted ammo (0.8 s flight): hold fire unless close or the target is slow
     if (p.weapon === W.ROCKET && d > 620 && Math.hypot(enemy.ps.velocity[0], enemy.ps.velocity[1]) > 120) return false;
-    if (p.weapon === W.RAIL) return err < tol + 1.0 * (1 - this.skill); // the rail needs a settled aim
+    if (p.weapon === W.RAIL) return err < tol + this.railSlack; // the rail needs a settled aim
     // hitscan sprayers / plasma: keep the trigger down while roughly on target (humans track while firing)
     return err < tol + 4 * (1 - this.skill);
   }
@@ -195,7 +200,7 @@ export class Bot {
     const toEnemy = normalize([enemy.ps.origin[0] - p.ps.origin[0], enemy.ps.origin[1] - p.ps.origin[1], 0]);
     const perp = [-toEnemy[1], toEnemy[0], 0];
     // strafe direction changes at human-ish intervals, and flips early when the way is blocked
-    if (now > this.strafeUntil) { this.strafeDir = this.rng() < 0.5 ? -1 : 1; this.strafeUntil = now + 350 + this.rng() * 800; }
+    if (now > this.strafeUntil) { this.strafeDir = this.rng() < 0.5 ? -1 : 1; this.strafeUntil = now + this.strafeBase + this.rng() * this.strafeSpread; }
     const probe = ma(p.ps.origin, 56 * this.strafeDir, perp);
     const tr = traceBox(this.game.world, p.ps.origin, probe, PM.mins, PM.maxs, null, { skipFlags: 0 });
     if (tr.fraction < 1) { this.strafeDir *= -1; this.strafeUntil = now + 400 + this.rng() * 600; }
@@ -211,7 +216,7 @@ export class Bot {
     else moveDir = normalize(ma([perp[0] * this.strafeDir, perp[1] * this.strafeDir, 0], toward, toEnemy));
     // jump now and then while strafing (harder to hit, rocket-jump-like unpredictability), more when hurt
     const hurtRecently = now - p.lastPain < 400;
-    const wantJump = p.ps.groundEntity && (this.rng() < (hurtRecently ? 0.06 : 0.02));
+    const wantJump = p.ps.groundEntity && (this.rng() < this.jumpChance * (hurtRecently ? 2.5 : 1));
     return { moveDir, wantJump };
   }
 

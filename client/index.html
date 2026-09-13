@@ -21,7 +21,7 @@
   <div id="hud-top">
     <div id="scores">
       <div class="scorebox me"><span id="score-me" class="score">0</span><span id="name-me" class="pname"></span></div>
-      <div id="timer">10:00</div>
+      <div id="timer-box"><div id="timer">10:00</div><div id="timer-sub"></div></div>
       <div class="scorebox them"><span id="score-them" class="score">0</span><span id="name-them" class="pname"></span></div>
     </div>
   </div>
@@ -40,6 +40,23 @@
   <div id="netgraph"><canvas id="ng-canvas" width="180" height="44"></canvas><div id="ng-text"><span id="ng-fps">0 fps</span><span id="ng-frame"></span><span id="ng-ping">0 ms</span><span id="ng-snap"></span></div></div>
 </div>
 <div id="scoreboard" class="hidden"></div>
+<div id="endscreen" class="hidden">
+  <div class="es-panel">
+    <div id="es-banner">MATCH OVER</div>
+    <div id="es-sub"></div>
+    <div class="es-tablewrap"><table id="es-table"></table></div>
+    <div class="es-next">
+      <div class="es-row">
+        <label>Next map <select id="es-map"></select></label>
+        <label>Mode <select id="es-mode"><option value="duel">Duel</option><option value="arena">Arena</option></select></label>
+        <button id="es-rematch" class="primary">REMATCH</button>
+        <button id="es-leave">LEAVE</button>
+      </div>
+      <div id="es-votes"></div>
+      <div id="es-auto"></div>
+    </div>
+  </div>
+</div>
 <div id="menu">
   <div class="panel">
     <h1>ARENA DUEL</h1>
@@ -47,6 +64,8 @@
     <label>Name <input id="name" maxlength="24" value=""></label>
     <label>Server <input id="server" value=""></label>
     <label>Map <select id="map"></select><span id="map-blurb" class="blurb"></span></label>
+    <label>Mode <select id="mode"><option value="duel">Duel</option><option value="arena">Arena</option></select><span id="mode-blurb" class="blurb"></span></label>
+    <label>Bot <select id="bot-skill"><option value="easy">Easy</option><option value="normal">Normal</option><option value="hard">Hard</option><option value="pro">Pro</option></select><span class="blurb">practice difficulty (reaction, aim, dodging)</span></label>
     <div class="row">
       <button id="btn-connect" class="primary">CONNECT</button>
       <button id="btn-practice">PRACTICE VS BOT</button>

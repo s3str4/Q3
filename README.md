@@ -7,8 +7,12 @@ by the test suite; the netcode design is in `docs/NETWORKING.md`.
 
 - 60 Hz server tick and 60 Hz snapshots (Q3 default is 20 Hz), client-side prediction with reconciliation,
   2-snapshot interpolation for remote players, lag-compensated hitscan (rewind capped at 250 ms).
-- Duel mode (10 min, sudden-death overtime) and Arena mode (rounds, full loadout).
-- Bots with skill-scaled reaction, aim and movement (strafe jumping, dodging, item timing) for practice.
+- Duel mode (10 min, item control, sudden-death overtime) and Arena mode (rounds with a 3-2-1 countdown, full loadout,
+  100/100, no pickups, first to 6 of 10), both selectable in the menu.
+- End-of-match screen (frags, deaths, damage, accuracy overall and per weapon) with REMATCH and a live map/mode vote;
+  the next match starts when both players are ready (bots always are) or by itself after 30 s.
+- Bots in four difficulty tiers (Easy / Normal / Hard / Pro) with skill-scaled reaction, aim, dodging and movement
+  (strafe jumping, item timing) for practice.
 - Direct browser-to-browser play over WebRTC with a copy/paste invite code: no server at all.
 - No build step: plain ES modules served straight from the repo.
 
@@ -38,7 +42,31 @@ Open `http://localhost:27960/` in a browser. Enter a name, leave the server fiel
 The match starts (3 s countdown) as soon as two players are in. Click **PRACTICE VS BOT** to play against a bot
 on the same server; the bot leaves automatically when a second human joins.
 
-URL parameters for automation: `?auto=1&bot=1&nolock=1&name=Me` joins a practice match without pointer lock.
+### Menu options
+
+- **Map**: the arena for sessions you host (practice, P2P host). On a dedicated server the map comes from the server.
+- **Mode**: *Duel* (10 minutes, item control, overtime) or *Arena* (rounds: everyone spawns with every weapon and
+  100 health / 100 armor, no pickups, a 3-2-1 countdown before each round, a round ends at the first kill or after
+  90 s in favour of the healthier player, first to 6 rounds wins). Applies to practice and to P2P hosting; the guest
+  receives the host's mode and map in the handshake. A dedicated server keeps its `--mode`.
+- **Bot**: practice difficulty. Easy / Normal / Hard / Pro map to bot skill 0.3 / 0.6 / 0.8 / 0.95 (reaction 420 to
+  160 ms, aim noise 6.6 to 1.4 degrees, dodge chance 25 to 90 %, more frequent strafe changes and hops, a stricter
+  rail trigger at the top). In 180 s headless duels a Pro bot beats a Normal one about 3:1 and an Easy one loses to
+  Normal about 1:2 (`node tools/scratch/bot_tiers.mjs --a 0.95 --b 0.6`).
+
+### End of a match
+
+When a match ends (duel time limit / overtime frag, arena majority) the end screen comes up over the HUD: winner,
+a table per player (frags, deaths, damage, accuracy overall and per weapon) and the match duration. Underneath, the
+next match: pick a **map** and a **mode** (every player's pick is shown live; both the same means that map, otherwise
+the host's / first player's pick wins) and click **REMATCH**. The next match starts with the usual countdown as soon
+as both players are ready (a bot is always ready); without any click it restarts by itself after 30 s. A map change
+reloads the arena on every client first: the countdown waits until everyone has loaded.
+
+URL parameters for automation: `?auto=1&bot=1&nolock=1&name=Me` joins a practice match without pointer lock;
+`?auto=1&local=1` runs a browser-hosted practice match instead; `mode=arena`, `skill=pro`, `map=lava_spire`
+pre-select the menu; `rules={"rounds":3,"roundTimelimit":6000}` overrides the match rules of a browser-hosted session
+(only honoured when the page is served from localhost).
 
 ### Server flags
 
@@ -141,7 +169,7 @@ is tuned for; raise it on very jittery connections).
 ## Tests and evidence
 
 ```sh
-node --test "tests/*.test.mjs"                 # benchmark, gameplay rules, netcode end-to-end (about 70 s)
+node --test "tests/*.test.mjs"                 # benchmark, gameplay rules, arena/rematch match flow, netcode end-to-end (about 80 s)
 node tools/bot_duel.mjs --map arena_duel --seconds 180 --quiet    # headless bot-vs-bot duel report (frags, accuracy, liveliness)
 node tools/netbench.mjs                        # latency/jitter/loss table (prediction error, rates, bandwidth, tick cost)
 node tools/evidence.mjs --name run1 --port 27970 --seconds 20 [--latency 150 --jitter 30 --loss 2] [--headed]

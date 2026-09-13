@@ -2,7 +2,7 @@
 import { loadMap } from '../shared/map.js';
 import { MAPS, DEFAULT_MAP } from '../maps/index.js';
 import { MSG, PROTOCOL_VERSION } from '../shared/protocol.js';
-import { TICK_MS, EV } from '../shared/constants.js';
+import { TICK_MS, EV, BOT_TIERS } from '../shared/constants.js';
 import { WsTransport, RtcTransport, PeerTransport, makeRoomCode, normalizeRoomCode } from './net/transport.js';
 import { ClientGame } from './net/clientgame.js';
 import { BrowserHost } from './net/host.js';
@@ -16,21 +16,28 @@ const settings = load();
 const canvas = $('gl');
 const hud = new Hud();
 const audio = new AudioEngine();
-let renderer = null, cg = null, input = null, host = null, running = false;
-window.__arena = { get cg() { return cg; }, get renderer() { return renderer; }, get audio() { return audio; }, get input() { return input; }, hud, settings }; // for automated evidence capture
+let renderer = null, cg = null, input = null, host = null, running = false, loadingMap = false;
+window.__arena = { get cg() { return cg; }, get renderer() { return renderer; }, get audio() { return audio; }, get input() { return input; }, get host() { return host; }, hud, settings }; // for automated evidence capture
 
 // ---- menu ----
+const MODE_BLURB = { duel: '10 min, item control, sudden-death overtime', arena: 'rounds, full loadout, 100/100, no pickups, first to 6' };
 $('name').value = settings.name; $('server').value = settings.server || defaultServer();
 $('sens').value = settings.sens; $('sens-v').textContent = settings.sens; $('fov').value = settings.fov; $('fov-v').textContent = settings.fov; $('vol').value = settings.vol; $('opt-cshair').checked = !!settings.bigCrosshair; $('opt-interp').value = settings.interp;
 $('sens').oninput = (e) => { settings.sens = +e.target.value; $('sens-v').textContent = settings.sens; if (input) input.sensitivity = settings.sens; save(); };
 $('fov').oninput = (e) => { settings.fov = +e.target.value; $('fov-v').textContent = settings.fov; if (renderer) renderer.setFov(settings.fov); save(); };
 $('vol').oninput = (e) => { settings.vol = +e.target.value; audio.setVolume(settings.vol); save(); };
 $('opt-cshair').onchange = (e) => { settings.bigCrosshair = e.target.checked; $('crosshair').classList.toggle('large', settings.bigCrosshair); save(); };
-// map selector (host side; the guest learns the map from the WELCOME handshake)
+// map / mode selectors (host side; the guest learns both from the WELCOME handshake), bot difficulty for practice
 for (const mp of MAPS) { const o = document.createElement('option'); o.value = mp.id; o.textContent = mp.title; $('map').appendChild(o); }
 if (!MAPS.some((mp) => mp.id === settings.map)) settings.map = DEFAULT_MAP;
+if (!['duel', 'arena'].includes(settings.mode)) settings.mode = 'duel';
+if (!BOT_TIERS[settings.botSkill]) settings.botSkill = 'normal';
 $('map').value = settings.map; $('map-blurb').textContent = (MAPS.find((mp) => mp.id === settings.map) || {}).blurb || '';
 $('map').onchange = (e) => { settings.map = e.target.value; $('map-blurb').textContent = (MAPS.find((mp) => mp.id === settings.map) || {}).blurb || ''; save(); };
+$('mode').value = settings.mode; $('mode-blurb').textContent = MODE_BLURB[settings.mode];
+$('mode').onchange = (e) => { settings.mode = e.target.value; $('mode-blurb').textContent = MODE_BLURB[settings.mode]; save(); };
+$('bot-skill').value = settings.botSkill;
+$('bot-skill').onchange = (e) => { settings.botSkill = e.target.value; save(); };
 $('opt-interp').onchange = (e) => { settings.interp = +e.target.value; if (cg) cg.interpSnaps = settings.interp; save(); };
 let staticPage = false; // true when the page is not served by a game server (GitHub Pages etc.)
 const NO_SERVER_MSG = 'This page has no game server behind it. To play someone: HOST GAME and send the room code (or JOIN with theirs). To join a dedicated server, enter its address (ws://host:27960) above.';
@@ -45,6 +52,16 @@ $('btn-join-manual').onclick = () => start({ kind: 'join', code: $('p2p-code').v
 $('btn-copy-room').onclick = () => copyText($('room-code').textContent, $('btn-copy-room'));
 $('btn-copy-room-link').onclick = () => copyText(location.origin + location.pathname + '?room=' + $('room-code').textContent, $('btn-copy-room-link'));
 const params = new URLSearchParams(location.search);
+// Automation parameters: ?mode=arena&skill=pro&map=lava_spire pre-select the menu; ?rules={"rounds":3} overrides the
+// match rules of a browser-hosted session (practice / P2P host) and is honoured only when the page is served from
+// localhost (test hook, never on a public deployment).
+if (params.get('map') && MAPS.some((mp) => mp.id === params.get('map'))) { settings.map = params.get('map'); $('map').value = settings.map; }
+if (params.get('mode') && MODE_BLURB[params.get('mode')]) { settings.mode = params.get('mode'); $('mode').value = settings.mode; $('mode-blurb').textContent = MODE_BLURB[settings.mode]; }
+if (params.get('skill') && BOT_TIERS[params.get('skill')]) { settings.botSkill = params.get('skill'); $('bot-skill').value = settings.botSkill; }
+if (params.get('name')) $('name').value = params.get('name').slice(0, 24);
+const LOCAL_PAGE = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+let rulesOverride = null;
+if (params.get('rules') && LOCAL_PAGE) { try { rulesOverride = JSON.parse(params.get('rules')); } catch { rulesOverride = null; } }
 // Static hosting (e.g. GitHub Pages): no game server behind the page. Detect it once and put the P2P flow forward.
 const servedByGameServer = fetch('info', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
 servedByGameServer.then((info) => {
@@ -67,10 +84,23 @@ const copyText = async (text, btn) => {
 };
 $('btn-copy-code').onclick = () => copyText($('p2p-code').value, $('btn-copy-code'));
 $('btn-copy-link').onclick = () => copyText(location.origin + location.pathname + '?join=' + encodeURIComponent($('p2p-code').value), $('btn-copy-link'));
-if (params.get('auto')) setTimeout(() => start({ kind: 'ws', url: params.get('server') || defaultServer(), bot: params.get('bot') === '1', name: params.get('name') }), 100);
+// ?auto=1 joins the server (bot=1: practice); ?auto=1&local=1 runs a browser-hosted practice match (no server needed)
+if (params.get('auto')) setTimeout(() => start(params.get('local') ? { kind: 'local', name: params.get('name') } : { kind: 'ws', url: params.get('server') || defaultServer(), bot: params.get('bot') === '1', name: params.get('name') }), 100);
 
 function defaultServer() { return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`; }
 function status(t) { $('menu-status').textContent = t; }
+const botSkill = () => BOT_TIERS[settings.botSkill] ?? BOT_TIERS.normal;
+
+// Load a map into the renderer and the HUD (first start and every server-driven map change). Q3 shows the map only
+// once the lightmap is loaded: wait for the vertex bake so the countdown never plays over unbaked black faces.
+async function loadArena(mapName) {
+  const map = await loadMap(mapName);
+  renderer = renderer || new Renderer(canvas);
+  renderer.loadMap(map); renderer.setFov(settings.fov);
+  hud.setMap(map);
+  if (renderer.bakePromise) { status('baking lighting...'); await renderer.bakePromise; status(''); }
+  return map;
+}
 
 async function start(mode) {
   if (running) return;
@@ -78,25 +108,26 @@ async function start(mode) {
   status('loading...');
   try {
     audio.init(); audio.resume(); audio.setVolume(settings.vol);
-    let transport, mapName = settings.map || DEFAULT_MAP, gameMode = 'duel';
+    let transport, mapName = settings.map || DEFAULT_MAP, gameMode = settings.mode || 'duel';
+    const hostOpts = () => ({ mode: gameMode, rules: rulesOverride || {}, log: (...m) => console.log('[host]', ...m) });
     if (mode.kind === 'ws') {
       if (!mode.url) throw new Error('no server address: enter ws://host:27960, or use HOST GAME / JOIN with a room code');
       transport = new WsTransport(normalizeWs(mode.url));
       try { await transport.connect(); } catch { throw new Error('could not reach the server at ' + normalizeWs(mode.url) + ' (is it running and reachable?). For play without a server use HOST GAME / JOIN.'); }
-      // ask the server which map it runs
+      // ask the server which map and mode it runs
       const info = await fetch(mode.url.replace(/^ws/, 'http').replace(/\/$/, '') + '/info').then((r) => r.json()).catch(() => null);
       if (info) { mapName = info.map; gameMode = info.mode; }
     } else if (mode.kind === 'local') {
       // practice without any server: the browser hosts the session and a bot fills the other slot
       const map = await loadMap(mapName);
-      host = new BrowserHost(map, { mode: gameMode, log: (...m) => console.log('[host]', ...m) });
+      host = new BrowserHost(map, hostOpts());
       transport = host.localLink();
-      host.addBot(0.6);
+      host.addBot(botSkill());
       transport.onmessage = null;
     } else if (mode.kind === 'host-room') {
       if (!PeerTransport.available()) throw new Error('signaling library not loaded; use the manual exchange below');
       const map = await loadMap(mapName);
-      host = new BrowserHost(map, { mode: gameMode, log: (...m) => console.log('[host]', ...m) });
+      host = new BrowserHost(map, hostOpts());
       transport = host.localLink();
       $('p2p-status').textContent = 'registering room...';
       let code = makeRoomCode();
@@ -119,7 +150,7 @@ async function start(mode) {
       ({ map: mapName, mode: gameMode } = await handshake(transport, settings.name));
     } else if (mode.kind === 'host') {
       const map = await loadMap(mapName);
-      host = new BrowserHost(map, { mode: gameMode, log: (...m) => console.log('[host]', ...m) });
+      host = new BrowserHost(map, hostOpts());
       transport = host.localLink();
       $('p2p-status').textContent = 'creating invite code...';
       const code = await host.invite();
@@ -136,22 +167,24 @@ async function start(mode) {
       transport = rtc;
       ({ map: mapName, mode: gameMode } = await handshake(transport, settings.name));
     }
-    const map = await loadMap(mapName);
-    renderer = renderer || new Renderer(canvas);
-    renderer.loadMap(map); renderer.setFov(settings.fov);
-    hud.setMap(map);
+    const map = await loadArena(mapName);
     let hostWaiting = mode.kind === 'host' || mode.kind === 'host-room';
-    cg = new ClientGame(map, transport, { mode: gameMode, name: settings.name, interpSnaps: settings.interp, onEvent: onEvent, onKick: (r) => stop('kicked: ' + r), onInfo: (info) => {
-      // P2P host: stay on the menu (the invite code is there) until the guest has joined, then enter the arena
-      if (hostWaiting && info.players && info.players.length >= 2) { hostWaiting = false; $('menu').classList.add('hidden'); $('p2p-status').textContent = 'peer connected'; if (!params.get('nolock')) input.lock(); audio.resume(); }
-    } });
+    const game = cg = new ClientGame(map, transport, { mode: gameMode, name: settings.name, interpSnaps: settings.interp, onEvent: onEvent, onKick: (r) => stop('kicked: ' + r),
+      onInfo: (info) => {
+        // P2P host: stay on the menu (the invite code is there) until the guest has joined, then enter the arena
+        if (hostWaiting && info.players && info.players.length >= 2) { hostWaiting = false; $('menu').classList.add('hidden'); $('p2p-status').textContent = 'peer connected'; if (!params.get('nolock')) input.lock(); audio.resume(); }
+      },
+      onVotes: (v) => hud.votes(v, game),
+      onMapChange: (m) => changeMap(game, m),
+    });
     transport.onclose = () => stop('disconnected');
-    // Q3 shows the map only once the lightmap is loaded: wait for the vertex bake before joining so the countdown
-    // never plays over unbaked black faces
-    if (renderer.bakePromise) { status('baking lighting...'); await renderer.bakePromise; status(''); }
-    cg.join(mode.bot ? { bot: true, botSkill: 0.6 } : {}); // ClientGame.join sends the protocol version and retries until WELCOME
-    input = input || new Input(canvas, { sensitivity: settings.sens, requireLock: !params.get('nolock'), keysAllowed: () => running && $('menu').classList.contains('hidden'), onLockChange: (locked) => { $('click-to-play').classList.toggle('hidden', locked || !running || !!params.get('nolock') || !$('menu').classList.contains('hidden')); }, onEscape: () => { if (running) { $('menu').classList.remove('hidden'); $('click-to-play').classList.add('hidden'); status('paused - click CONNECT to resume'); } }, onScoreboard: (s) => hud.scoreboard(s, cg), currentWeapon: () => cg.predicted ? cg.predicted.weapon : 0, hasWeapon: (w) => cg.predicted ? (cg.predicted.weapons & (1 << w)) !== 0 : true });
+    cg.join(mode.bot ? { bot: true, botSkill: botSkill() } : {}); // ClientGame.join sends the protocol version and retries until WELCOME
+    input = input || new Input(canvas, { sensitivity: settings.sens, requireLock: !params.get('nolock'), keysAllowed: () => running && $('menu').classList.contains('hidden') && !hud.endVisible, onLockChange: (locked) => { $('click-to-play').classList.toggle('hidden', locked || !running || !!params.get('nolock') || !$('menu').classList.contains('hidden') || hud.endVisible); }, onEscape: () => { if (running && !hud.endVisible) { $('menu').classList.remove('hidden'); $('click-to-play').classList.add('hidden'); status('paused - click CONNECT to resume'); } }, onScoreboard: (s) => hud.scoreboard(s, cg), currentWeapon: () => cg && cg.predicted ? cg.predicted.weapon : 0, hasWeapon: (w) => cg && cg.predicted ? (cg.predicted.weapons & (1 << w)) !== 0 : true });
     input.sensitivity = settings.sens;
+    // end screen controls -> intermission protocol
+    hud.onVote = (v) => { if (cg) cg.sendVote(v); };
+    hud.onReady = (r) => { if (cg) cg.sendReady(r); };
+    hud.onLeave = () => stop('left the match');
     running = true;
     hud.show(); $('crosshair').classList.toggle('large', settings.bigCrosshair);
     if (!hostWaiting) { $('menu').classList.add('hidden'); if (!params.get('nolock')) { input.lock(); input.onLockChange(input.locked); } }
@@ -160,6 +193,25 @@ async function start(mode) {
     $('click-to-play').onclick = () => { input.lock(); audio.resume(); };
     loop();
   } catch (e) { console.error(e); status('failed: ' + e.message); running = false; }
+}
+// Server-driven map / mode change (after a map vote): reload the renderer and HUD for the new map, rebuild the client
+// game, then report LOADED so the server can release the countdown. Snapshots that arrive meanwhile belong to the
+// new server game and are only applied once the client game matches it (setMap), which is why this is sequential.
+async function changeMap(game, m) {
+  if (cg !== game) return;
+  loadingMap = true;
+  hud.hideEnd();
+  hud.center('LOADING', 1500, (MAPS.find((mp) => mp.id === m.map) || {}).title || m.map);
+  try {
+    const sameMap = game.mapName === m.map;
+    const map = sameMap ? game.map : await loadArena(m.map);
+    if (cg !== game) return; // the session ended while the map was loading
+    game.setMap(map, m.mode, m.rules);
+    game.sendLoaded();
+    spawnedAngles = false;
+    if (input) input.onLockChange(input.locked); // the click-to-play overlay comes back if the end screen released the mouse
+  } catch (e) { console.error('map change failed', e); stop('map change failed: ' + e.message); }
+  finally { loadingMap = false; }
 }
 // One-shot JOIN -> WELCOME exchange to learn which map/mode the host runs (the session resends WELCOME on the
 // client's later JOIN, so this costs nothing). Falls back to the default map if the host never answers.
@@ -173,7 +225,7 @@ function handshake(transport, name) {
   });
 }
 function normalizeWs(u) { if (!u) return defaultServer(); if (!/^wss?:\/\//.test(u)) u = 'ws://' + u; return u; }
-function stop(reason) { running = false; hud.hide(); $('menu').classList.remove('hidden'); status(reason); if (cg) { cg.close(); } if (host) host.close(); cg = null; host = null; }
+function stop(reason) { running = false; hud.hide(); $('menu').classList.remove('hidden'); $('click-to-play').classList.add('hidden'); status(reason); if (cg) { cg.close(); } if (host) host.close(); cg = null; host = null; }
 
 function onEvent(e, predicted) {
   if (!cg) return;
@@ -210,7 +262,7 @@ function loop() {
   }
   input.applyMouse();
   cg.interpolate();
-  const view = cg.localView(now);
+  const view = loadingMap ? null : cg.localView(now);
   if (view) {
     // render the freshest mouse angles even between sim steps (lowest possible look latency)
     view.angles = [input.pitch, input.yaw, 0];
@@ -221,5 +273,5 @@ function loop() {
   audio.update(cg, now);
 }
 
-function load() { try { return { name: 'player', server: '', sens: 5, fov: 100, vol: 0.8, interp: 2, bigCrosshair: false, map: 'arena_duel', ...JSON.parse(localStorage.getItem('arena-settings') || '{}') }; } catch { return { name: 'player', server: '', sens: 5, fov: 100, vol: 0.8, interp: 2 }; } }
+function load() { try { return { name: 'player', server: '', sens: 5, fov: 100, vol: 0.8, interp: 2, bigCrosshair: false, map: 'arena_duel', mode: 'duel', botSkill: 'normal', ...JSON.parse(localStorage.getItem('arena-settings') || '{}') }; } catch { return { name: 'player', server: '', sens: 5, fov: 100, vol: 0.8, interp: 2, map: 'arena_duel', mode: 'duel', botSkill: 'normal' }; } }
 function save() { try { localStorage.setItem('arena-settings', JSON.stringify(settings)); } catch {} }
