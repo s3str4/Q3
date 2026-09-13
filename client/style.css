@@ -152,3 +152,42 @@ details { margin: 8px 0; font-size: 13px; } summary { cursor: pointer; opacity: 
 #keys-hint { margin-top: 6px; }
 #keys-panel .row { margin: 8px 0 0; } #keys-reset { flex: none; padding: 6px 12px; font-size: 11px; }
 .fade-in { animation: fadein 250ms ease-out forwards; } @keyframes fadein { from { opacity: 0 } to { opacity: 1 } }
+/* demos: library rows in the menu */
+.demos { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; max-height: 260px; overflow-y: auto; }
+.demos .none { font-size: 11px; opacity: 0.55; letter-spacing: 0.5px; padding: 4px 0; }
+.demos .demo { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; align-items: center; background: rgba(0,0,0,0.35); border-left: 3px solid var(--accent); padding: 6px 10px; border-radius: 3px; }
+.demos .demo .n { grid-column: 1; font-size: 12px; letter-spacing: 0.5px; font-weight: 700; line-height: 1.25; }
+.demos .demo .m { grid-column: 1; font-size: 10px; opacity: 0.55; letter-spacing: 1px; }
+.demos .demo .b { grid-column: 2; grid-row: 1 / span 2; display: flex; gap: 6px; }
+.demos .demo .b button { flex: none; padding: 5px 9px; font-size: 10px; letter-spacing: 1px; }
+/* demo playback overlay: transport bar at the bottom, frag list at the left */
+#hud.demo #netgraph, #hud.demo #click-to-play, #hud.demo #speedometer { display: none; }
+/* the bottom of the screen belongs to the transport bar: the HUD stats and the weapon bar move up */
+#hud.demo #hud-bottom { bottom: 92px; } #hud.demo #weapons { bottom: 210px; }
+#hud.demo.thirdperson #crosshair, #hud.demo.thirdperson #dmg-dirs, #hud.demo.thirdperson #hitmarker { display: none; }
+#demo-ui { position: fixed; inset: 0; pointer-events: none; z-index: 4; font-family: var(--num); font-stretch: condensed; user-select: none; }
+#demo-bar { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: rgba(8,10,18,0.82); border: 1px solid #3a4560; border-radius: 6px; pointer-events: auto; box-shadow: 0 10px 30px rgba(0,0,0,0.5); min-width: 760px; }
+#demo-bar button { flex: none; padding: 6px 10px; font-size: 12px; letter-spacing: 1px; font-family: var(--num); }
+#demo-play { min-width: 40px; font-size: 14px; }
+#demo-time { font-variant-numeric: tabular-nums; font-size: 15px; min-width: 96px; text-align: center; letter-spacing: 1px; }
+#demo-track { position: relative; flex: 1; min-width: 280px; height: 26px; display: flex; align-items: center; }
+#demo-seek { width: 100%; margin: 0; accent-color: var(--accent); cursor: pointer; }
+#demo-track .marks { position: absolute; left: 8px; right: 8px; top: 1px; height: 5px; pointer-events: none; }
+#demo-track .marks i { position: absolute; top: 0; width: 3px; height: 5px; margin-left: -1px; background: #cfd8e6; border-radius: 1px; }
+#demo-track .marks i.me { background: var(--blue); box-shadow: 0 0 4px var(--blue); } #demo-track .marks i.them { background: var(--red); box-shadow: 0 0 4px var(--red); }
+#demo-speeds { display: flex; gap: 2px; }
+#demo-speeds button { padding: 6px 7px; background: #0f1420; border-color: #2c3648; min-width: 36px; }
+#demo-speeds button.on { background: var(--accent); color: #1a1000; border-color: #ffd28a; }
+#demo-cam { background: #0a0d14; border: 1px solid #2c3648; color: #fff; padding: 6px 8px; border-radius: 4px; font-size: 12px; letter-spacing: 1px; font-family: var(--num); max-width: 200px; }
+#demo-hint { position: absolute; left: 50%; bottom: 66px; transform: translateX(-50%); font-size: 11px; letter-spacing: 2px; opacity: 0.6; text-shadow: 0 0 4px #000; white-space: nowrap; }
+#demo-frags { position: absolute; left: 20px; top: 50%; transform: translateY(-50%); width: 260px; max-height: 60vh; display: flex; flex-direction: column; background: rgba(8,10,18,0.78); border: 1px solid #3a4560; border-radius: 6px; pointer-events: auto; overflow: hidden; }
+#demo-frags .h { padding: 8px 12px; font-size: 12px; letter-spacing: 3px; font-weight: 700; border-bottom: 1px solid #2a3040; display: flex; justify-content: space-between; }
+#demo-frags .h .n { opacity: 0.6; }
+#demo-frags .list { overflow-y: auto; display: flex; flex-direction: column; }
+#demo-frags .frag { flex: none; display: flex; gap: 10px; align-items: center; text-align: left; background: transparent; border: 0; border-bottom: 1px solid #1c2334; border-radius: 0; padding: 6px 12px; font-size: 13px; letter-spacing: 0.5px; font-weight: 400; color: var(--hud); }
+#demo-frags .frag:hover { background: rgba(255,255,255,0.06); }
+#demo-frags .frag.past { opacity: 0.55; }
+#demo-frags .frag .t { font-variant-numeric: tabular-nums; opacity: 0.7; min-width: 34px; }
+#demo-frags .frag .mod { opacity: 0.6; font-size: 11px; letter-spacing: 1px; }
+#demo-frags .frag b.me { color: var(--blue); } #demo-frags .frag b.them { color: var(--red); }
+#demo-frags .none { padding: 10px 12px; font-size: 12px; opacity: 0.55; }

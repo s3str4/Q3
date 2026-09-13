@@ -39,6 +39,7 @@
   <div id="weapons"></div>
   <div id="netgraph"><canvas id="ng-canvas" width="180" height="44"></canvas><div id="ng-text"><span id="ng-fps">0 fps</span><span id="ng-frame"></span><span id="ng-ping">0 ms</span><span id="ng-snap"></span></div></div>
 </div>
+<div id="demo-ui" class="hidden"></div>
 <div id="scoreboard" class="hidden"></div>
 <div id="endscreen" class="hidden">
   <div class="es-panel">
@@ -81,6 +82,11 @@
         <div class="row"><button id="btn-copy-link" class="hidden">COPY INVITE LINK</button><button id="btn-copy-code" class="hidden">COPY CODE</button></div>
       </details>
     </details>
+    <details id="demos-panel"><summary>Demos</summary>
+      <div id="demos-list" class="demos"></div>
+      <div class="row"><button id="btn-demo-load">LOAD FILE</button><input id="demo-file" type="file" accept=".json,.gz,.json.gz,application/json,application/gzip" class="hidden"></div>
+      <div id="demos-status" class="blurb">the last 10 matches are kept here (IndexedDB); download a demo to send it, load a file to watch one</div>
+    </details>
     <details id="settings"><summary>Settings</summary>
       <div class="ident">
         <canvas id="skin-preview" width="96" height="128" title="your model as the opponent sees it"></canvas>
@@ -93,6 +99,7 @@
       <label>FOV <input id="fov" type="range" min="80" max="130" step="1" value="100"><span id="fov-v">100</span></label>
       <label>Master volume <input id="vol" type="range" min="0" max="1" step="0.05" value="0.8"></label>
       <label><input id="opt-cshair" type="checkbox"> Large crosshair</label>
+      <label><input id="opt-demos" type="checkbox"> Record demos <span class="blurb">every match, kept in the Demos panel (last 10)</span></label>
       <label><input id="opt-interp" type="range" min="1" max="4" step="1" value="2"> Interpolation (snapshots)</label>
       <details id="keys-panel"><summary>Keys</summary>
         <table id="keys"></table>

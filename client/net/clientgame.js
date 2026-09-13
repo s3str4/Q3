@@ -29,6 +29,7 @@ export class ClientGame {
     this.onVotes = opts.onVotes || (() => {});           // intermission state (votes, ready flags, next map, time left)
     this.onMapChange = opts.onMapChange || (() => {});   // (msg) the server switched map/mode: load it, call setMap(), then sendLoaded()
     this.onWelcome = opts.onWelcome || (() => {});
+    this.onSnap = opts.onSnap || (() => {});         // (snap) every snapshot on arrival, before its events are dispatched (demo recording)
     this.maps = null; this.mapName = map.name;
     this.predicted = null; // predicted local player state (ps + stats)
     this.misprediction = 0; this.corrections = 0; this.mispredMax = 0;
@@ -131,6 +132,7 @@ export class ClientGame {
     this.snapClock.push(snap.t - now); if (this.snapClock.length > 90) this.snapClock.shift(); this._snapClockDirty = true;
     this.snapshots.push(snap);
     if (this.snapshots.length > 32) this.snapshots.shift();
+    this.onSnap(snap);
     // events
     for (const e of snap.ev || []) this.dispatchEvent(e);
     // reconcile local player

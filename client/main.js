@@ -11,14 +11,19 @@ import { Hud } from './hud.js';
 import { Renderer } from './render/renderer.js';
 import { SKIN_PALETTE } from './render/playermodel.js';
 import { AudioEngine } from './audio/audio.js';
+import { DemoRecorder } from './demo.js';
+import { DemoStore, DemoPlayer, unpackDemo, downloadDemo } from './demoplayer.js';
 
 const $ = (id) => document.getElementById(id);
 const settings = load();
 const canvas = $('gl');
 const hud = new Hud();
 const audio = new AudioEngine();
-let renderer = null, cg = null, input = null, host = null, running = false, loadingMap = false;
-window.__arena = { get cg() { return cg; }, get renderer() { return renderer; }, get audio() { return audio; }, get input() { return input; }, get host() { return host; }, hud, settings }; // for automated evidence capture
+let renderer = null, cg = null, input = null, host = null, running = false, loadingMap = false, demoPlayer = null;
+// demos: every match is recorded (setting "Record demos") and kept in IndexedDB; the Demos panel lists / plays / exports them
+const demoStore = new DemoStore({ keep: 10 });
+const recorder = new DemoRecorder({ onDemo: (d) => demoStore.add(d).then((rec) => { refreshDemos(); console.log('[demo] saved', rec.name, Math.round(rec.bytes / 1024) + ' KB'); }).catch((e) => console.warn('[demo] not saved:', e)) });
+window.__arena = { get cg() { return cg; }, get renderer() { return renderer; }, get audio() { return audio; }, get input() { return input; }, get host() { return host; }, get demo() { return demoPlayer; }, demos: demoStore, recorder, hud, settings }; // for automated evidence capture
 
 // ---- menu ----
 const MODE_BLURB = { duel: '10 min, item control, sudden-death overtime', arena: 'rounds, full loadout, 100/100, no pickups, first to 6' };
@@ -28,6 +33,8 @@ $('sens').oninput = (e) => { settings.sens = +e.target.value; $('sens-v').textCo
 $('fov').oninput = (e) => { settings.fov = +e.target.value; $('fov-v').textContent = settings.fov; if (renderer) renderer.setFov(settings.fov); save(); };
 $('vol').oninput = (e) => { settings.vol = +e.target.value; audio.setVolume(settings.vol); save(); };
 $('opt-cshair').onchange = (e) => { settings.bigCrosshair = e.target.checked; $('crosshair').classList.toggle('large', settings.bigCrosshair); save(); };
+$('opt-demos').checked = settings.recordDemos !== false;
+$('opt-demos').onchange = (e) => { settings.recordDemos = e.target.checked; save(); if (!settings.recordDemos) recorder.disarm(); else if (cg && cg.localId) recorder.arm(DemoRecorder.headerFrom(cg)); };
 // map / mode selectors (host side; the guest learns both from the WELCOME handshake), bot difficulty for practice
 for (const mp of MAPS) { const o = document.createElement('option'); o.value = mp.id; o.textContent = mp.title; $('map').appendChild(o); }
 if (!MAPS.some((mp) => mp.id === settings.map)) settings.map = DEFAULT_MAP;
@@ -173,6 +180,30 @@ const copyText = async (text, btn) => {
 };
 $('btn-copy-code').onclick = () => copyText($('p2p-code').value, $('btn-copy-code'));
 $('btn-copy-link').onclick = () => copyText(location.origin + location.pathname + '?join=' + encodeURIComponent($('p2p-code').value), $('btn-copy-link'));
+// ---- demos panel: the library (newest first) with Play / Download / Delete, and Load file to import one ----
+async function refreshDemos() {
+  const list = $('demos-list');
+  let demos = [];
+  try { demos = await demoStore.list(); } catch (e) { list.innerHTML = '<div class="none">demo storage unavailable (' + esc(e.message) + ')</div>'; return; }
+  if (!demos.length) { list.innerHTML = '<div class="none">no demos yet: every match is recorded while "Record demos" is on</div>'; return; }
+  list.innerHTML = demos.map((d) => `<div class="demo" data-id="${d.id}"><div class="n">${esc(d.name)}</div><div class="m">${fmtDur(d.duration)} · ${d.snaps || '?'} snapshots · ${Math.round(d.bytes / 1024)} KB${d.gz ? ' gzip' : ''}</div><div class="b"><button class="play primary">PLAY</button><button class="dl">DOWNLOAD</button><button class="del">DELETE</button></div></div>`).join('');
+  for (const row of list.querySelectorAll('.demo')) {
+    const id = +row.dataset.id;
+    row.querySelector('.play').onclick = async () => { try { $('demos-status').textContent = 'loading demo...'; const demo = await demoStore.get(id); $('demos-status').textContent = ''; start({ kind: 'demo', demo }); } catch (e) { $('demos-status').textContent = 'cannot play: ' + e.message; } };
+    row.querySelector('.dl').onclick = async () => { try { const rec = await demoStore.getRecord(id); const name = await downloadDemo(rec); $('demos-status').textContent = 'saved ' + name; } catch (e) { $('demos-status').textContent = 'download failed: ' + e.message; } };
+    row.querySelector('.del').onclick = async () => { await demoStore.remove(id); refreshDemos(); };
+  }
+}
+$('btn-demo-load').onclick = () => $('demo-file').click();
+$('demo-file').onchange = async (e) => {
+  const f = e.target.files && e.target.files[0]; e.target.value = ''; if (!f) return;
+  try { $('demos-status').textContent = 'reading ' + f.name + '...'; const demo = await unpackDemo(f); const rec = await demoStore.add(demo); await refreshDemos(); $('demos-status').textContent = 'imported: ' + rec.name; }
+  catch (err) { $('demos-status').textContent = 'import failed: ' + err.message; }
+};
+$('demos-panel').addEventListener('toggle', () => { if ($('demos-panel').open) refreshDemos(); });
+refreshDemos();
+function fmtDur(ms) { const s = Math.round((ms || 0) / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
+function esc(t) { return String(t).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
 // ?auto=1 joins the server (bot=1: practice); ?auto=1&local=1 runs a browser-hosted practice match (no server needed)
 if (params.get('auto')) setTimeout(() => start(params.get('local') ? { kind: 'local', name: params.get('name') } : { kind: 'ws', url: params.get('server') || defaultServer(), bot: params.get('bot') === '1', name: params.get('name') }), 100);
 
@@ -193,6 +224,7 @@ async function loadArena(mapName) {
 
 async function start(mode) {
   if (running) return;
+  if (mode.kind === 'demo') return startDemo(mode.demo);
   settings.name = mode.name || $('name').value.trim() || 'player'; settings.server = $('server').value.trim(); save();
   status('loading...');
   try {
@@ -260,6 +292,9 @@ async function start(mode) {
     const map = await loadArena(mapName);
     let hostWaiting = mode.kind === 'host' || mode.kind === 'host-room';
     const game = cg = new ClientGame(map, transport, { mode: gameMode, name: settings.name, skin: ident.skin, color: ident.color, interpSnaps: settings.interp, onEvent: onEvent, onKick: (r) => stop('kicked: ' + r),
+      // demo recording: armed on WELCOME (map / mode / rules known), every snapshot on arrival, the view per frame in loop()
+      onWelcome: (m) => { if (settings.recordDemos !== false) recorder.arm(DemoRecorder.headerFrom(game, m)); },
+      onSnap: (snap) => recorder.snapshot(snap, snap.recvAt),
       onInfo: (info) => {
         // P2P host: stay on the menu (the invite code is there) until the guest has joined, then enter the arena
         if (hostWaiting && info.players && info.players.length >= 2) { hostWaiting = false; $('menu').classList.add('hidden'); $('p2p-status').textContent = 'peer connected'; if (!params.get('nolock')) input.lock(); audio.resume(); }
@@ -269,8 +304,7 @@ async function start(mode) {
     });
     transport.onclose = () => stop('disconnected');
     cg.join(mode.bot ? { bot: true, botSkill: botSkill() } : {}); // ClientGame.join sends the protocol version and retries until WELCOME
-    input = input || new Input(canvas, { sensitivity: settings.sens, bindings: settings.keys, requireLock: !params.get('nolock'), keysAllowed: () => running && $('menu').classList.contains('hidden') && !hud.endVisible, onLockChange: (locked) => { $('click-to-play').classList.toggle('hidden', locked || !running || !!params.get('nolock') || !$('menu').classList.contains('hidden') || hud.endVisible); }, onEscape: () => { if (running && !hud.endVisible) { $('menu').classList.remove('hidden'); $('click-to-play').classList.add('hidden'); status('paused - click CONNECT to resume'); } }, onScoreboard: (s) => hud.scoreboard(s, cg), currentWeapon: () => cg && cg.predicted ? cg.predicted.weapon : 0, hasWeapon: (w) => cg && cg.predicted ? (cg.predicted.weapons & (1 << w)) !== 0 : true });
-    input.sensitivity = settings.sens;
+    ensureInput();
     // end screen controls -> intermission protocol
     hud.onVote = (v) => { if (cg) cg.sendVote(v); };
     hud.onReady = (r) => { if (cg) cg.sendReady(r); };
@@ -279,11 +313,35 @@ async function start(mode) {
     hud.show(); $('crosshair').classList.toggle('large', settings.bigCrosshair);
     if (!hostWaiting) { $('menu').classList.add('hidden'); if (!params.get('nolock')) { input.lock(); input.onLockChange(input.locked); } }
     else status('hosting: share the invite code below; the arena opens when your opponent connects');
-    $('btn-connect').onclick = () => { if (running) { $('menu').classList.add('hidden'); input.lock(); input.onLockChange(input.locked); audio.resume(); } };
+    $('btn-connect').onclick = resumeHandler;
     $('click-to-play').onclick = () => { input.lock(); audio.resume(); };
     loop();
   } catch (e) { console.error(e); status('failed: ' + e.message); running = false; }
 }
+// The Input object is created once (its document listeners live for the page) and shared by the live game and the demo player.
+function ensureInput() {
+  input = input || new Input(canvas, { sensitivity: settings.sens, bindings: settings.keys, requireLock: !params.get('nolock'), keysAllowed: () => running && $('menu').classList.contains('hidden') && !hud.endVisible, onLockChange: (locked) => { $('click-to-play').classList.toggle('hidden', locked || !running || !!params.get('nolock') || !$('menu').classList.contains('hidden') || hud.endVisible); }, onEscape: () => { if (running && !hud.endVisible) { $('menu').classList.remove('hidden'); $('click-to-play').classList.add('hidden'); status('paused - click CONNECT to resume'); } }, onScoreboard: (s) => hud.scoreboard(s, cg), currentWeapon: () => cg && cg.predicted ? cg.predicted.weapon : 0, hasWeapon: (w) => cg && cg.predicted ? (cg.predicted.weapons & (1 << w)) !== 0 : true });
+  input.sensitivity = settings.sens;
+  return input;
+}
+const connectHandler = $('btn-connect').onclick; // CONNECT starts a session; during one it resumes (menu closed, mouse captured)
+const resumeHandler = () => { if (running && cg) { $('menu').classList.add('hidden'); input.lock(); input.onLockChange(input.locked); audio.resume(); } };
+// ---- demo playback: the recorded match through the same renderer / HUD / audio, no network (client/demoplayer.js) ----
+async function startDemo(demo) {
+  if (running) return;
+  status('loading demo...');
+  try {
+    audio.init(); audio.resume(); audio.setVolume(settings.vol);
+    const map = await loadArena(demo.map);
+    ensureInput();
+    running = true;
+    demoPlayer = new DemoPlayer(demo, { map, renderer, hud, audio, input, canvas, settings, onExit: () => stopDemo('demo closed') });
+    hud.show(); $('crosshair').classList.toggle('large', settings.bigCrosshair); $('menu').classList.add('hidden'); $('click-to-play').classList.add('hidden');
+    demoPlayer.start();
+    status('');
+  } catch (e) { console.error(e); status('demo failed: ' + e.message); running = false; if (demoPlayer) { demoPlayer.stop(); demoPlayer = null; } }
+}
+function stopDemo(reason) { running = false; if (demoPlayer) demoPlayer.stop(); demoPlayer = null; hud.hide(); $('menu').classList.remove('hidden'); $('btn-connect').onclick = connectHandler; status(reason); }
 // Server-driven map / mode change (after a map vote): reload the renderer and HUD for the new map, rebuild the client
 // game, then report LOADED so the server can release the countdown. Snapshots that arrive meanwhile belong to the
 // new server game and are only applied once the client game matches it (setMap), which is why this is sequential.
@@ -298,6 +356,7 @@ async function changeMap(game, m) {
     if (cg !== game) return; // the session ended while the map was loading
     game.setMap(map, m.mode, m.rules);
     game.sendLoaded();
+    recorder.stop(); if (settings.recordDemos !== false) recorder.arm(DemoRecorder.headerFrom(game)); // a new match on the new map: a new demo
     spawnedAngles = false;
     if (input) input.onLockChange(input.locked); // the click-to-play overlay comes back if the end screen released the mouse
   } catch (e) { console.error('map change failed', e); stop('map change failed: ' + e.message); }
@@ -316,7 +375,8 @@ function handshake(transport, name, ident = {}) {
   });
 }
 function normalizeWs(u) { if (!u) return defaultServer(); if (!/^wss?:\/\//.test(u)) u = 'ws://' + u; return u; }
-function stop(reason) { running = false; hud.hide(); $('menu').classList.remove('hidden'); $('click-to-play').classList.add('hidden'); status(reason); if (cg) { cg.close(); } if (host) host.close(); cg = null; host = null; }
+// Re-entrant: closing a browser-hosted session fires the local link's onclose synchronously, which lands here again.
+function stop(reason) { if (!running && !cg && !host) return; running = false; recorder.stop(); hud.hide(); $('menu').classList.remove('hidden'); $('click-to-play').classList.add('hidden'); $('btn-connect').onclick = connectHandler; status(reason); const c = cg, h = host; cg = null; host = null; if (c) c.close(); if (h) h.close(); }
 
 function onEvent(e, predicted) {
   if (!cg) return;
@@ -357,6 +417,7 @@ function loop() {
   if (view) {
     // render the freshest mouse angles even between sim steps (lowest possible look latency)
     view.angles = [input.pitch, input.yaw, 0];
+    if (recorder.recording) recorder.view(cg.lastRenderTime ?? cg.renderTime(now), view, now); // the demo keeps what this frame shows
     renderer.update(cg, view, now, dt);
     audio.updateListener([view.origin[0], view.origin[1], view.origin[2] + view.viewHeight], view.angles);
     hud.update(cg, view, now);
@@ -364,6 +425,6 @@ function loop() {
   audio.update(cg, now);
 }
 
-function DEFAULT_SETTINGS() { return { name: 'player', server: '', sens: 5, fov: 100, vol: 0.8, interp: 2, bigCrosshair: false, map: 'arena_duel', mode: 'duel', botSkill: 'normal', physics: 'vq3', skin: 'sarge', color: 5, keys: {} }; }
+function DEFAULT_SETTINGS() { return { name: 'player', server: '', sens: 5, fov: 100, vol: 0.8, interp: 2, bigCrosshair: false, recordDemos: true, map: 'arena_duel', mode: 'duel', botSkill: 'normal', physics: 'vq3', skin: 'sarge', color: 5, keys: {} }; }
 function load() { try { return { ...DEFAULT_SETTINGS(), ...JSON.parse(localStorage.getItem('arena-settings') || '{}') }; } catch { return DEFAULT_SETTINGS(); } }
 function save() { try { localStorage.setItem('arena-settings', JSON.stringify(settings)); } catch {} }

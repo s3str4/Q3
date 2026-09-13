@@ -196,10 +196,53 @@ LMB / MMB / RMB, the wheel as WHEEL UP / WHEEL DOWN. **Reset defaults** restores
 `localStorage` with the other settings; `client/input.js` resolves everything through the bindings map, and the help
 line under the menu shows the current summary.
 
+## Demos
+
+Every match is recorded (Settings > **Record demos**, on by default) the way Quake 3 records a demo: from the
+countdown to MATCH_END the client keeps everything it received (the WELCOME with map / mode / rules, every snapshot
+with its arrival time and the events it carried, the final MATCH_END summary) plus its own first-person view sampled
+per rendered frame (the predicted origin and the mouse angles at render time, ~60 Hz), so a replay shows exactly what
+the recorder saw. Leaving mid-match keeps a partial demo. The last 10 demos live in IndexedDB; the menu's **Demos**
+panel lists them (date, map, mode, players, score) with **PLAY**, **DOWNLOAD** (`<date>_<map>_<mode>_<players>.json.gz`
+via CompressionStream, plain `.json` where the browser lacks it) and **DELETE**; **LOAD FILE** imports a demo someone
+sent (`.json` or `.json.gz`).
+
+Format (`client/demo.js`, `DEMO_FORMAT` 1): a JSON object with the header (`map`, `mode`, `rules`, `welcome`, `localId`,
+`players` table with names / skins / colours), `snaps` (one integer row per snapshot: server time, tick, arrival offset,
+player rows with positions to 1/128 unit, velocities to 1/16 and angles to 1/100 degree - the wire quantisation, so remote
+entities decode to the exact values the live client interpolated - projectile rows, an index into the item-state table,
+an index into the match-state table, the events), `views` (render time in 0.1 ms, origin, angles, view height, flags),
+`end` (the MATCH_END summary). Item arrays and match objects are stored once per distinct value. Measured by
+`tests/demo.test.mjs`: about 354 bytes per snapshot row and 40 bytes per view sample, 1.35 MB of JSON per minute
+(13 MB for a 10-minute duel in memory as text, far less as packed integer rows), 240 KB per minute gzipped.
+
+Playback (`client/demoplayer.js`) loads the demo's map into the same renderer / HUD / audio as live play and feeds the
+recorded snapshots on the recorded timeline (server time; no network, no prediction): remote players, projectiles,
+items and events come from the snapshots exactly as in live play, so effects and sounds play back; a snapshot's events
+fire when the clock passes its time minus the interpolation delay, which is when a live client received them relative
+to what it rendered. The recorder's recorded view drives the first-person camera. Controls (bar at the bottom, also
+keys): play / pause (**Space**), timeline scrubber with elapsed / total and a mark per kill (blue: the recorder's frags,
+red: deaths), **&larr;** / **&rarr;** seek 5 s, speed 0.25 / 0.5 / 1 / 2 / 4 (**[** / **]**), camera (**C** cycles):
+first person of the recorder, third-person chase of either player, free camera (WASD flies along the view, Shift
+fast, click the arena to capture the mouse), a frag list on the left (**F** toggles; click a kill to jump 2.5 s before
+it), **Tab** scoreboard, **Esc** back to the menu. Seeking in either direction rebuilds the state from the snapshot
+pair around the target time (snapshots are full-state), dropping in-flight effects and projectiles, and replays only
+the events from there on. Effects and animations run at real time whatever the playback speed (the snapshot timeline
+is what is scaled).
+
+Automation: `window.__arena.demo` is the running player (`time`, `duration`, `speed`, `playing`, `seek(ms)`,
+`setSpeed(s)`, `setCamera('first' | 'chase' | 'free', playerId)`, `frags`), `window.__arena.demos` the library
+(`list()`, `get(id)`, `add(demo)`, `remove(id)`), `window.__arena.recorder` the live recorder.
+`tests/demo.test.mjs` records a duel between two headless clients over a real WebSocket and checks the recording
+(map / mode / rules, 60 Hz snapshots, the match events, the summary), that a Node-side `DemoCursor` seeking to
+arbitrary times returns exactly what a live `ClientGame` interpolates (0 error over 400 seeks) and the recorded view
+within its quantisation (0.006 units), that events replay exactly once in order at speed 1 and 4 and after seeks, and
+the size per minute.
+
 ## Tests and evidence
 
 ```sh
-node --test "tests/*.test.mjs"                 # benchmark, gameplay rules, arena/rematch match flow, netcode end-to-end (about 80 s)
+node --test "tests/*.test.mjs"                 # benchmark, gameplay rules, arena/rematch match flow, netcode end-to-end, demos (about 90 s)
 node tools/bot_duel.mjs --map arena_duel --seconds 180 --quiet    # headless bot-vs-bot duel report (frags, accuracy, liveliness)
 node tools/netbench.mjs                        # latency/jitter/loss table (prediction error, rates, bandwidth, tick cost)
 node tools/evidence.mjs --name run1 --port 27970 --seconds 20 [--latency 150 --jitter 30 --loss 2] [--headed]
@@ -217,7 +260,9 @@ the JOIN skin / colour validation; `tests/game.test.mjs` covers damage/armor/kno
 items, spawns, telefrag, duel and arena match flow, out-of-ammo switching, lag-compensation rewind and the bots;
 `tests/netcode.test.mjs` runs the real server with two headless clients at 0 ms, 100 ± 20 ms / 2 % and
 150 ± 30 ms / 2 % loss and checks prediction error, acks, snapshot rate, consistency, lag compensation hit rates
-(with and without `--no-lagcomp`) and server robustness (protocol check, malformed/flooded commands, disconnects).
+(with and without `--no-lagcomp`) and server robustness (protocol check, malformed/flooded commands, disconnects);
+`tests/demo.test.mjs` records a real duel and verifies the demo format, the playback cursor against a live ClientGame
+and the event replay (see **Demos**).
 
 ## Layout
 
@@ -226,8 +271,10 @@ shared/     constants.js (Q3 values), vec3, brush, trace (box sweeps), pmove (bg
             game.js (players, weapons, projectiles, damage, items, match), bot.js, session.js (transport-agnostic
             authoritative session), protocol.js
 server/     index.mjs (HTTP static + WebSocket server, flags), netsim.mjs (latency/jitter/loss simulator)
-client/     main.js, input.js, hud.js, net/ (clientgame.js prediction+interpolation, transport.js WebSocket/WebRTC,
-            host.js browser P2P host, headless.js Node driver for tests), render/, audio/
+client/     main.js, input.js, hud.js, demo.js (demo format, recorder, playback cursor: pure, Node-usable),
+            demoplayer.js (IndexedDB library, .json.gz files, the demo player + overlay), net/ (clientgame.js
+            prediction+interpolation, transport.js WebSocket/WebRTC, host.js browser P2P host, headless.js Node
+            driver for tests), render/, audio/
 maps/       map modules (build(m) with the MapBuilder DSL); arena_duel.js is the competitive map
 tools/      bot_duel.mjs, netbench.mjs, evidence.mjs, screenshots.mjs, audio_measure.mjs, build_static.mjs
 tests/      node:test suites
