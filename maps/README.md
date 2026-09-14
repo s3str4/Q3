@@ -241,3 +241,22 @@ Three duel maps ship; the host picks one in the menu and the guest receives it i
 | Tight Deck | `tight_deck.js` | compact, cool/tech | aerowalk-style deck on seven height levels (0..224), corridors 96-128 wide, a teleporter from the Mega pit to the junction, no free eye line longer than 731 |
 
 Each map has its own acceptance suite (`tests/map*.test.mjs`): enclosure, bot reachability of every item and spawn, player-box clearance on every nav edge, corridor/ceiling/stair limits, major-item spacing and spawn sightlines, plus map-specific rules (lava crossings, teleporter exit, sightline caps, route verticality).
+
+
+## Visual detail pass (renderer-side)
+
+Each map's `build(m)` sets `m.rooms` (the room voids with their clearance class) and `m.ambient.skyDome` (zenith /
+horizon / cloud colours, star and cloud amounts, drift speed, gain). `client/render/detail.js` turns the rooms,
+lights, items and triggers into non-colliding architecture at load time (cornices, skirting, pilasters, ribs, lintels
+with arch brackets, ceiling beams, hanging lamps, item spawn pads, jump pad rims, teleporter frames, banners or pipes /
+cables / vents, ember rocks in lava, grime decals), styled per map:
+
+| Map | Style | Extras |
+|---|---|---|
+| Crossfire | gothic: stone cornices and ribs, timber beams, arch brackets | banners (red west, blue east, green hub / chambers), violet night sky |
+| Lava Spire | gothic, dark stone trims | red banners, ember rocks breaking the lava, smoke-red sky |
+| Tight Deck | tech: bolted steel bands and pilasters, steel beams | pipes and cables under the ceilings, wall vents, teleporter frame |
+
+Nothing here is collision geometry: the detail brushes are never in `map.brushes`, so every acceptance suite above
+runs on exactly the same geometry as before. Where a wall, a doorway or a ceiling is comes from probing the real
+solids (`pointContents` / `traceBox`), so a map gets the pass without declaring anything beyond `m.rooms`.

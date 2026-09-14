@@ -69,7 +69,7 @@ export class ItemView {
     // floor ring marker (item spots read from afar, like Q3's simple-item bases)
     const ringMat = shared('ring' + color, () => new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.5, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false }));
     this.ring = new THREE.Mesh(shared('ringGeo', () => new THREE.RingGeometry(14, 19, 32)), ringMat);
-    this.ring.position.z = (it.floorZ ?? (it.origin[2] - 20)) - it.origin[2] + 0.6;
+    this.ring.position.z = (it.floorZ ?? (it.origin[2] - 20)) - it.origin[2] + 3.6; // on top of the 3-high spawn pad (detail.js)
     this.group.add(this.ring);
     this.light = null;
     if (this.def.major) { this.light = new THREE.PointLight(color, 3200, 300, 2); this.light.position.set(0, 0, 14); this.group.add(this.light); }

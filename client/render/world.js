@@ -4,7 +4,8 @@
 import * as THREE from 'three';
 import { clipPolygon, polygonArea } from '../../shared/brush.js';
 import { pointContents } from '../../shared/trace.js';
-import { getMaterial, MATERIAL_DEFS } from './materials.js';
+import { getMaterial, MATERIAL_DEFS, patchAnim, setSky, decalMaterial } from './materials.js';
+import { buildDetail } from './detail.js';
 
 const GRID = 32;          // subdivision cell size (world units)
 const MIN_SUBDIV = 48;    // faces smaller than this in both directions stay as single polygons
@@ -22,7 +23,12 @@ export function brushCovers(b) {
 // it (convex clipping: the part outside each brush plane is kept, the part inside all of them is dropped); the face
 // is hidden only when nothing with a visible area remains. Sampling points (the old centre + corners heuristic)
 // culled a 224-high wall whose centre and corners happened to sit inside flush glow strips while the rest showed.
-export function faceCovered(brushes, own, poly, lift = FACE_LIFT) {
+export function faceCovered(brushes, own, poly, lift = FACE_LIFT) { return visibleFragments(brushes, own, poly, lift).length === 0; }
+// The visible remainder of a face: the fragments left after every covering brush is subtracted (in the lifted plane,
+// moved back onto the face). Detail brushes (non-colliding trims, pads, rocks) are drawn from these fragments only,
+// so a rock half sunk in a floor or a cornice butting into a pillar never puts a vertex inside solid geometry (where
+// the bake would find every ray blocked and paint it black).
+export function visibleFragments(brushes, own, poly, lift = FACE_LIFT) {
   const n = poly.plane.n;
   let frags = [poly.verts.map((p) => [p[0] + n[0] * lift, p[1] + n[1] * lift, p[2] + n[2] * lift])];
   const mins = [Infinity, Infinity, Infinity], maxs = [-Infinity, -Infinity, -Infinity];
@@ -42,9 +48,9 @@ export function faceCovered(brushes, own, poly, lift = FACE_LIFT) {
       // whatever is left in `inside` lies within the brush: covered
     }
     frags = next;
-    if (!frags.length) return true;
+    if (!frags.length) return [];
   }
-  return false;
+  return frags.map((f) => f.map((p) => [p[0] - n[0] * lift, p[1] - n[1] * lift, p[2] - n[2] * lift]));
 }
 
 // UV projection axes for a face normal: the two world axes not dominated by the normal (Q3 "world" mapping).
@@ -57,61 +63,81 @@ function axesFor(n) {
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 
 // Split a convex polygon by a GRID-aligned lattice along (u, v) axes. Returns a list of convex sub-polygons.
-function subdivide(verts, u, v) {
+function subdivide(verts, u, v, grid = GRID) {
   let umin = Infinity, umax = -Infinity, vmin = Infinity, vmax = -Infinity;
   for (const p of verts) { const a = dot(p, u), b = dot(p, v); umin = Math.min(umin, a); umax = Math.max(umax, a); vmin = Math.min(vmin, b); vmax = Math.max(vmax, b); }
   if (umax - umin < MIN_SUBDIV && vmax - vmin < MIN_SUBDIV) return [verts];
   const out = [];
-  const u0 = Math.floor(umin / GRID) * GRID, v0 = Math.floor(vmin / GRID) * GRID;
+  const u0 = Math.floor(umin / grid) * grid, v0 = Math.floor(vmin / grid) * grid;
   // strips along u, then cells along v (clipPolygon keeps the inside: dot(n,p) <= d)
-  for (let a = u0; a < umax; a += GRID) {
+  for (let a = u0; a < umax; a += grid) {
     let strip = clipPolygon(verts, { n: [-u[0], -u[1], -u[2]], d: -a });          // p.u >= a
     if (strip.length < 3) continue;
-    strip = clipPolygon(strip, { n: u, d: a + GRID });                              // p.u <= a + GRID
+    strip = clipPolygon(strip, { n: u, d: a + grid });                              // p.u <= a + grid
     if (strip.length < 3) continue;
-    for (let b = v0; b < vmax; b += GRID) {
+    for (let b = v0; b < vmax; b += grid) {
       let cell = clipPolygon(strip, { n: [-v[0], -v[1], -v[2]], d: -b });
       if (cell.length < 3) continue;
-      cell = clipPolygon(cell, { n: v, d: b + GRID });
+      cell = clipPolygon(cell, { n: v, d: b + grid });
       if (cell.length >= 3) out.push(cell);
     }
   }
   return out.length ? out : [verts];
 }
 
-// Build merged geometry groups: Map(materialName -> { positions, normals, uvs, indices }).
-export function buildWorldGeometry(map) {
+// Build merged geometry groups: Map(materialName -> { positions, normals, uvs, indices }). `detail` is the list of
+// non-colliding detail brushes (detail.js): they are drawn from their visible fragments (clipped against the map's
+// solids, see visibleFragments) and never cover anything themselves. Only material definitions are consulted here
+// (scale, uvFit, invisibility), so the textures can be generated after the bake has been kicked off.
+export function buildWorldGeometry(map, detail = []) {
   const groups = new Map();
   let culled = 0;
-  for (const b of map.brushes) {
+  const all = detail.length ? [...map.brushes, ...detail] : map.brushes;
+  for (const b of all) {
     if (b.flags & 2 /* NODRAW */) continue;
     const matName = b.mat || 'wall';
-    const material = getMaterial(matName);
-    if (material.visible === false) continue;
+    const def = MATERIAL_DEFS[matName] || MATERIAL_DEFS.wall;
+    if (def.invisible) continue;
     if (!groups.has(matName)) groups.set(matName, { positions: [], normals: [], uvs: [], indices: [], keys: new Map() });
     const g = groups.get(matName);
-    const scale = material.userData.scale || 128;
+    const scale = def.scale || 128, fit = def.uvFit || null, grid = b.grid || GRID;
+    const isDetail = !!(b.flags & 64 /* NOCOLLIDE */);
     for (const poly of b.polys) {
       const n = poly.plane.n;
-      // hidden-face cull: a face buried in neighbouring drawn solid brushes can never be seen (exact test, see faceCovered)
-      if (!b.nonsolid && faceCovered(map.brushes, b, poly)) { culled++; continue; }
+      let pieces;
+      if (isDetail) { pieces = visibleFragments(map.brushes, b, poly); if (!pieces.length) { culled++; continue; } }
+      else {
+        // hidden-face cull: a face buried in neighbouring drawn solid brushes can never be seen (exact test, see faceCovered)
+        if (!b.nonsolid && faceCovered(map.brushes, b, poly)) { culled++; continue; }
+        pieces = [poly.verts];
+      }
       const [u, v] = axesFor(n);
+      // fitted UVs: the face's own extent (before clipping) maps to one texture (pads, lamps, banners) or, for 'v',
+      // the v axis only (a cornice's moulding profile spans the band's height while its dentils repeat along it)
+      let umin = 0, uspan = scale, vmin = 0, vspan = scale;
+      if (fit) {
+        let ua = Infinity, ub = -Infinity, va = Infinity, vb = -Infinity;
+        for (const p of poly.verts) { const a = dot(p, u), c = dot(p, v); ua = Math.min(ua, a); ub = Math.max(ub, a); va = Math.min(va, c); vb = Math.max(vb, c); }
+        if (fit === 'both') { umin = ua; uspan = Math.max(1e-3, ub - ua); }
+        vmin = va; vspan = Math.max(1e-3, vb - va);
+      }
       // winding: polygons from plane clipping may be either orientation; flip so triangles face along the normal
       const a = poly.verts[0], b2 = poly.verts[1], c2 = poly.verts[2];
       const cx = (b2[1] - a[1]) * (c2[2] - a[2]) - (b2[2] - a[2]) * (c2[1] - a[1]);
       const cy = (b2[2] - a[2]) * (c2[0] - a[0]) - (b2[0] - a[0]) * (c2[2] - a[2]);
       const cz = (b2[0] - a[0]) * (c2[1] - a[1]) - (b2[1] - a[1]) * (c2[0] - a[0]);
       const flip = (cx * n[0] + cy * n[1] + cz * n[2]) < 0;
-      for (const cell of subdivide(poly.verts, u, v)) {
+      for (const piece of pieces) for (const cell of subdivide(piece, u, v, grid)) {
         const idx = [];
         for (const p of cell) {
-          // share vertices between neighbouring cells of the same face (same position + normal)
-          const key = `${Math.round(p[0] * 8)},${Math.round(p[1] * 8)},${Math.round(p[2] * 8)},${n[0].toFixed(2)},${n[1].toFixed(2)},${n[2].toFixed(2)}`;
+          const tu = (dot(p, u) - umin) / uspan, tv = (dot(p, v) - vmin) / vspan;
+          // share vertices between neighbouring cells of the same face (same position + normal + uv)
+          const key = `${Math.round(p[0] * 8)},${Math.round(p[1] * 8)},${Math.round(p[2] * 8)},${n[0].toFixed(2)},${n[1].toFixed(2)},${n[2].toFixed(2)},${tu.toFixed(3)},${tv.toFixed(3)}`;
           let i = g.keys.get(key);
           if (i === undefined) {
             i = g.positions.length / 3; g.keys.set(key, i);
             g.positions.push(p[0], p[1], p[2]); g.normals.push(n[0], n[1], n[2]);
-            g.uvs.push(dot(p, u) / scale, dot(p, v) / scale);
+            g.uvs.push(tu, tv);
           }
           idx.push(i);
         }
@@ -181,7 +207,9 @@ export function bakedMaterial(base) {
   const m = base.clone();
   m.userData = { ...base.userData };
   m.metalness = Math.min(base.metalness, WORLD_MAX_METALNESS);
+  const anim = base.userData.anim || null;
   m.onBeforeCompile = (shader) => {
+    if (anim) patchAnim(shader, anim); // time-driven emissive (lava, pads, lamps): uTime uniform + emissive lookup
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nattribute vec3 baked;\nvarying vec3 vBaked;')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvBaked = baked;');
@@ -192,17 +220,22 @@ export function bakedMaterial(base) {
       // ambient specular metals would otherwise lack, so worn metal panels still catch the room's light
       .replace('#include <lights_fragment_end>', '#include <lights_fragment_end>\nvec3 bakedClamped = min( vBaked, vec3( ' + BAKE_CLAMP.toFixed(2) + ' ) );\nreflectedLight.indirectDiffuse += bakedClamped * BRDF_Lambert( diffuseColor.rgb );\nreflectedLight.indirectSpecular += bakedClamped * material.specularColor * ( 1.0 - 0.75 * material.roughness );');
   };
-  m.customProgramCacheKey = () => 'baked';
+  m.customProgramCacheKey = () => 'baked' + (anim || '');
   return m;
 }
 
 // Create the meshes and kick off the bake. Returns { meshes, bake: Promise } — the promise resolves when the bake
 // finished (or failed; the world then keeps its flat ambient estimate).
 export function buildWorld(scene, map, opts = {}) {
-  const { groups, culled } = buildWorldGeometry(map);
+  // non-colliding architecture (cornices, ribs, lintels, beams, lamps, item pads, rocks, pipes...) and grime decals,
+  // built from the map's rooms, lights, items and triggers: drawn with the world, lit by the same bake, never traced
+  const detail = opts.detail === false ? { brushes: [], decals: [] } : buildDetail(map);
+  const { groups, culled } = buildWorldGeometry(map, detail.brushes);
   const meshes = [];
   const all = []; // per group: geometry + offset into the combined bake arrays
   let total = 0;
+  const amb = map.ambient || {}; const [sky, ground] = hemiColors(amb);
+  const hemiI = (amb.hemi ? amb.hemi[2] : 0.35) * 3.2; // same AMBIENT scale as bake.worker.js
   for (const [name, g] of groups) {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(g.positions, 3));
@@ -213,18 +246,25 @@ export function buildWorld(scene, map, opts = {}) {
     const count = g.positions.length / 3;
     // initial estimate: hemisphere ambient (no AO/shadows yet) so the first frames are lit, not black
     const baked = new Float32Array(count * 3);
-    const amb = map.ambient || {}; const [sky, ground] = hemiColors(amb);
-    const hemiI = (amb.hemi ? amb.hemi[2] : 0.35) * 3.2; // same AMBIENT scale as bake.worker.js
     for (let i = 0; i < count; i++) { const k = g.normals[i * 3 + 2] * 0.5 + 0.5; for (let c = 0; c < 3; c++) baked[i * 3 + c] = (sky[c] * k + ground[c] * (1 - k)) * hemiI; }
     geo.setAttribute('baked', new THREE.BufferAttribute(baked, 3));
+    all.push({ name, geo, offset: total, count }); total += count;
+  }
+  // the bake (a worker) starts before the textures are painted, so the two overlap instead of queueing
+  const bake = runBake(map, all, total, opts).catch((e) => { console.warn('bake failed', e); });
+  setSky(map.ambient);
+  for (const { name, geo } of all) {
     const base = getMaterial(name);
     const mesh = new THREE.Mesh(geo, base.userData.unlit ? base : bakedMaterial(base));
     mesh.userData.world = true; mesh.matrixAutoUpdate = false; mesh.frustumCulled = true;
     scene.add(mesh); meshes.push(mesh);
-    all.push({ geo, offset: total, count }); total += count;
   }
-  const stats = { vertices: total, triangles: [...groups.values()].reduce((s, g) => s + g.indices.length / 3, 0), drawCalls: groups.size, culledFaces: culled };
-  const bake = runBake(map, all, total, opts).catch((e) => { console.warn('bake failed', e); });
+  if (detail.decals.length) {
+    const dm = buildDecalMesh(detail.decals);
+    dm.userData.world = true; dm.matrixAutoUpdate = false; dm.renderOrder = 1;
+    scene.add(dm); meshes.push(dm);
+  }
+  const stats = { vertices: total, triangles: [...groups.values()].reduce((s, g) => s + g.indices.length / 3, 0), drawCalls: groups.size + (detail.decals.length ? 1 : 0), culledFaces: culled, detailBrushes: detail.brushes.length, decals: detail.decals.length };
   // rebake(params): run the bake again with overridden tunables (tuning tools), same geometry
   return { meshes, bake, stats, rebake: (params) => runBake(map, all, total, { ...opts, params }).catch((e) => { console.warn('bake failed', e); }) };
 }
@@ -279,25 +319,54 @@ export function surfaceLights(map) {
   return out;
 }
 
+// Decals: convex polygons (already clipped to their face by detail.js) with atlas UVs, one multiply-blended mesh.
+function buildDecalMesh(decals) {
+  const pos = [], uv = [], idx = [];
+  for (const d of decals) {
+    const base = pos.length / 3;
+    for (let i = 0; i < d.verts.length; i++) { pos.push(...d.verts[i]); uv.push(d.uvs[i][0], d.uvs[i][1]); }
+    for (let i = 1; i + 1 < d.verts.length; i++) idx.push(base, base + i, base + i + 1);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(idx);
+  const mesh = new THREE.Mesh(geo, decalMaterial());
+  mesh.frustumCulled = false;
+  return mesh;
+}
+
 function hemiColors(amb) {
   const hex = (c) => { const v = parseInt(String(c).replace('#', ''), 16); return [((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255].map((x) => Math.pow(x, 2.2)); };
   return [hex(amb.hemi ? amb.hemi[0] : '#8fa3c7'), hex(amb.hemi ? amb.hemi[1] : '#20160f')];
 }
 
+// One bake worker for the page's lifetime, created by prewarmBake() while the page is still idle (the renderer's
+// constructor): a worker created at map load waited 6-8 s for its script while the main thread painted textures and
+// compiled shaders (measured: 1.9-3.3 s of compute behind a 6.5-8.3 s start delay on the duel maps). Bakes are
+// sequential; each carries a job id so a superseded bake's late chunks are ignored.
+let baker = null, bakeJob = 0;
+export function prewarmBake() {
+  if (baker || typeof Worker === 'undefined') return baker;
+  try { baker = new Worker(new URL('./bake.worker.js', import.meta.url), { type: 'module' }); } catch (e) { console.warn('bake worker', e); baker = null; }
+  return baker;
+}
+// at module load: the page is idle (menu, map fetch) long enough for the worker to fetch and evaluate its script
+if (typeof window !== 'undefined') prewarmBake();
 function runBake(map, groups, total, opts) {
   return new Promise((resolve, reject) => {
-    if (typeof Worker === 'undefined') return reject(new Error('no Worker'));
+    const worker = prewarmBake();
+    if (!worker) return reject(new Error('no Worker'));
     const positions = new Float32Array(total * 3), normals = new Float32Array(total * 3);
     for (const g of groups) { positions.set(g.geo.attributes.position.array, g.offset * 3); normals.set(g.geo.attributes.normal.array, g.offset * 3); }
     // only what the tracer needs (polys are dropped to keep the structured clone small)
     const brushes = map.brushes.map((b) => ({ planes: b.planes.map((p) => ({ n: p.n, d: p.d, signbits: p.signbits })), mins: b.mins, maxs: b.maxs, nonsolid: !!b.nonsolid, flags: b.flags | 0, sky: b.mat === 'sky' }));
-    let worker;
-    try { worker = new Worker(new URL('./bake.worker.js', import.meta.url), { type: 'module' }); } catch (e) { return reject(e); }
-    const t0 = performance.now();
-    worker.onerror = (e) => { worker.terminate(); reject(new Error(e.message || 'worker error')); };
+    const job = ++bakeJob, t0 = performance.now(), createdAt = Date.now();
+    worker.onerror = (e) => { baker = null; worker.terminate(); reject(new Error(e.message || 'worker error')); };
     worker.onmessage = (ev) => {
       const m = ev.data;
-      if (m.done) { worker.terminate(); if (opts.onProgress) opts.onProgress(1); resolve({ ms: performance.now() - t0 }); return; }
+      if (m.job !== job) return; // a superseded bake (map changed mid-bake)
+      if (m.done) { if (opts.onProgress) opts.onProgress(1); resolve({ ms: performance.now() - t0, workerMs: m.ms, startDelayMs: m.startedAt - createdAt, doneDelayMs: Date.now() - m.finishedAt }); return; }
       // scatter the chunk into the geometries it spans
       const from = m.from, data = m.data, n = data.length / 3;
       for (const g of groups) {
@@ -309,6 +378,6 @@ function runBake(map, groups, total, opts) {
       }
       if (opts.onProgress) opts.onProgress((from + n) / total);
     };
-    worker.postMessage({ brushes, lights: map.lights, surfaceLights: surfaceLights(map), ambient: map.ambient || {}, positions, normals, chunk: 2048, params: opts.params || null }, [positions.buffer, normals.buffer]);
+    worker.postMessage({ job, brushes, lights: map.lights, surfaceLights: surfaceLights(map), ambient: map.ambient || {}, positions, normals, chunk: 2048, params: opts.params || null }, [positions.buffer, normals.buffer]);
   });
 }

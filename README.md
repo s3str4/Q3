@@ -296,7 +296,31 @@ items, spawns, telefrag, duel and arena match flow, out-of-ammo switching, lag-c
 150 ± 30 ms / 2 % loss and checks prediction error, acks, snapshot rate, consistency, lag compensation hit rates
 (with and without `--no-lagcomp`) and server robustness (protocol check, malformed/flooded commands, disconnects);
 `tests/demo.test.mjs` records a real duel and verifies the demo format, the playback cursor against a live ClientGame
-and the event replay (see **Demos**).
+and the event replay (see **Demos**); `tests/render_world.test.mjs` checks the world builder's exact hidden-face cull
+and `tests/bake_grid.test.mjs` the lighting bake's grid tracer against the brute-force one on every shipped map.
+
+## World rendering
+
+The world is one merged mesh per material (`client/render/world.js`), lit by a per-vertex bake (`bake.worker.js`:
+ambient occlusion, shadowed point lights, one bounce, sky light and the emissive strips as area lights, the id Tech 3
+lightmap role) with real-time lights only adding specular. Everything visual is procedural, no image assets:
+
+- **Materials** (`client/render/materials.js`): every material is a pattern (stone blocks, riveted plates, grating,
+  tech panels, trims, cornice mouldings, pipes, rock, cloth...) painted at 4 texels per world unit into albedo / normal
+  / roughness / emissive canvases (256-512 px, tileable noise fields cached per size). Lava, jump pads, teleporters,
+  item pads and lamps carry a time-driven emissive (`uTime`, `updateMaterials()`). `materialStats()` reports the
+  generated textures: a duel map uses 29-38 materials, 47-58 MB of texture memory including mips, painted in ~1.7-2 s
+  on the main thread while the bake runs in its worker. Open rooms see a `sky` shader dome (gradient, stars, drifting
+  nebula) coloured by the map's `ambient.skyDome`.
+- **Detail geometry** (`client/render/detail.js`): non-colliding architecture generated from the map's rooms, lights,
+  items and triggers - cornices, skirting, pilasters and ribs, lintels and arch brackets over every doorway, ceiling
+  beams, hanging lamps at the point lights, octagonal spawn pads under the pickups, jump pad rims, teleporter frames,
+  ember rocks in the lava, pipes / cables / vents (tech style) or banners (gothic style), plus multiply-blended grime
+  decals. Detail brushes carry `BRUSH_FLAGS.NOCOLLIDE`, exist only in the renderer and are drawn from the fragments
+  left after the map's solids are subtracted, so movement, weapons, bots and the map tests see the playable geometry
+  unchanged. Per-map style comes from `STYLES` (by map name); rooms are exposed by the map's `m.rooms`.
+- **Bake cost**: the worker reads its candidate brushes off a 128-unit grid (`tests/bake_grid.test.mjs` asserts the
+  result is identical to the brute-force tracer), which pays for the detail pass (+20-80% vertices).
 
 ## Layout
 

@@ -12,7 +12,8 @@ import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
 import { WEAPONS, EV } from '../../shared/constants.js';
 import { angleVectors } from '../../shared/vec3.js';
 import { traceBox } from '../../shared/trace.js';
-import { buildWorld, MAP_LIGHT_DECAY } from './world.js';
+import { buildWorld, prewarmBake, MAP_LIGHT_DECAY } from './world.js';
+import { updateMaterials } from './materials.js';
 import { ItemView } from './items.js';
 import { Effects } from './effects.js';
 import { setParticleViewport } from './particles.js';
@@ -81,6 +82,7 @@ export class Renderer {
     this.timerExt = gl.getExtension('EXT_disjoint_timer_query_webgl2'); this.gpuQueries = [];
     this.resize();
     window.addEventListener('resize', () => this.resize());
+    prewarmBake(); // the lighting bake worker loads its script now, while nothing else is running
   }
   resize() {
     const w = window.innerWidth, h = window.innerHeight;
@@ -266,6 +268,7 @@ export class Renderer {
     this.viewmodel.update(p, view, now, dt, this.bobTime, bobAmt);
     this.effects.update(now, dt, this.camera, view.dead ? null : av.forward);
     // --- render ---
+    updateMaterials(now); // animated world emissives (lava, pads, lamps) and the sky's drift
     this.renderer.info.reset();
     const gl = this.renderer.getContext(), ext = this.timerExt;
     let q = null;
