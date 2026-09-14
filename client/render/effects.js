@@ -9,7 +9,7 @@ import { ma, normalize, sub, dist } from '../../shared/vec3.js';
 import { traceBox } from '../../shared/trace.js';
 import { clipPolygon } from '../../shared/brush.js';
 import { LightPool } from './lightpool.js';
-import { ParticlePool, getSprite } from './particles.js';
+import { ParticlePool, getSprite, MUZZLE_ROW, MUZZLE_FRAMES } from './particles.js';
 import { Beam } from './beam.js';
 import { weaponColor } from './weapons.js';
 
@@ -17,7 +17,10 @@ const rgb = (hex) => [((hex >> 16) & 255) / 255, ((hex >> 8) & 255) / 255, (hex 
 const RAIL_DEFAULT = 0x73b3ff; // rail colour for players without a chosen colour (bots): Q3's light blue
 const rnd = (a, b) => a + Math.random() * (b - a);
 const LG_RANGE = WEAPON_DEFS[WEAPONS.LIGHTNING].range;
-const FIREBALL_FRAMES = 16;
+const FIREBALL_FRAMES = 32;
+// third-person muzzle flash size (world units) and life (ms) per weapon: the 'muzzle' sheet row plays its 3 frames over the life
+const MUZZLE_SIZE = { [WEAPONS.ROCKET]: 26, [WEAPONS.SHOTGUN]: 24, [WEAPONS.RAIL]: 20, [WEAPONS.LIGHTNING]: 12, [WEAPONS.PLASMA]: 14, [WEAPONS.MACHINEGUN]: 15 };
+const MUZZLE_MS = { [WEAPONS.ROCKET]: 90, [WEAPONS.SHOTGUN]: 90, [WEAPONS.RAIL]: 140, [WEAPONS.LIGHTNING]: 70, [WEAPONS.PLASMA]: 60, [WEAPONS.MACHINEGUN]: 55 };
 
 // A fixed set of objects handed out in turn (the oldest is recycled when all are busy): no scene-graph churn.
 class MeshPool {
@@ -63,10 +66,12 @@ export class Effects {
     this.fire = new ParticlePool(scene, 256, { additive: true, texture: 'fire', nearFade: 8 });
     this.smoke = new ParticlePool(scene, 768, { additive: false, sheet: 'smoke4', nearFade: 40, maxPx: 380 });
     this.blood = new ParticlePool(scene, 384, { additive: false, sheet: 'blood4', maxPx: 64, nearFade: 8 });
-    this.flashes = new ParticlePool(scene, 48, { additive: true, sheet: 'flash', nearFade: 6, maxPx: 200 });
+    this.flashes = new ParticlePool(scene, 48, { additive: true, sheet: 'muzzle', nearFade: 6, maxPx: 220 });
     this.rings = new ParticlePool(scene, 128, { additive: true, sheet: 'ring4', nearFade: 10 });
     this.plasma = new ParticlePool(scene, 192, { additive: true, sheet: 'plasma', nearFade: 8, maxPx: 160 });
-    this.pools = [this.sparks, this.glow, this.fireball, this.fire, this.smoke, this.blood, this.flashes, this.rings, this.plasma];
+    this.sizzle = new ParticlePool(scene, 64, { additive: true, sheet: 'sizzle', nearFade: 8, maxPx: 140 });
+    this.shimmer = new ParticlePool(scene, 128, { additive: true, texture: 'shimmer', nearFade: 8, maxPx: 60 });
+    this.pools = [this.sparks, this.glow, this.fireball, this.fire, this.smoke, this.blood, this.flashes, this.rings, this.plasma, this.sizzle, this.shimmer];
     this.beams = new Map(); // player id -> { beam, until, dir, light, own }
     this.mats = {
       // decals: shared materials, per-vertex colour + alpha (so a fading mark never needs its own material)
@@ -116,14 +121,14 @@ export class Effects {
       case EV.RAIL_TRAIL: { const shooter = cg.game && cg.game.players.get(e.id); this.railTrail(e.start, e.end, e.id === cg.localId, playerColorHex(shooter && shooter.color, RAIL_DEFAULT)); break; }
       case EV.LG_HIT: this.lgHit(e.origin, e.world, e.normal); break;
       case EV.BULLET_IMPACT: this.impact(e.origin, e.normal, e.weapon); break;
-      case EV.PAIN: if (e.id !== cg.localId) this.bloodSpray(e.origin, e.damage); break;
+      case EV.PAIN: if (e.id !== cg.localId) { const att = e.attacker && cg.game && cg.game.players.get(e.attacker); this.bloodSpray(e.origin, e.damage, att && att.ps ? normalize(sub(e.origin, att.ps.origin)) : null); } break;
       case EV.DEATH: if (e.gib) this.gibs(e.origin); break;
       case EV.FIRE: if (e.id === cg.localId) this.localFire(e, cg); else this.remoteFire(e, cg); break;
       case EV.JUMPPAD: this.padBurst(e.origin); break;
       case EV.TELEPORT: this.teleFlash(e.origin, e.id === cg.localId); break;
       case EV.RESPAWN: this.teleFlash(e.origin, e.id === cg.localId); break;
       case EV.PICKUP: this.pickupFlash(e.origin); break;
-      case EV.ITEM_RESPAWN: this.pickupFlash(e.origin, 0xffffff, 0.5); break;
+      case EV.ITEM_RESPAWN: this.respawnShimmer(e.origin); break;
     }
   }
 
@@ -151,9 +156,10 @@ export class Effects {
     const m = (this.remoteMuzzle && this.remoteMuzzle(e.id)) || ma(e.origin, 24, e.dir);
     const c = weaponColor(e.weapon);
     this.flash(this.lightSpot(cg, e.origin, e.dir, 36), c, 1000, 280, 90, (k) => (1 - k) * (1 - k));
-    // muzzle flash sprite (one of the sheet's shapes, random spin) + hot core
-    const big = e.weapon === WEAPONS.ROCKET || e.weapon === WEAPONS.SHOTGUN || e.weapon === WEAPONS.RAIL;
-    this.flashes.spawn({ pos: ma(m, 3, e.dir), life: big ? 80 : 55, size: big ? 24 : 14, grow: 0.5, color: rgb(c).map((x) => 0.6 + x * 0.6), alpha: 0.95, fade: 1, frame: Math.floor(Math.random() * 3), rot: rnd(0, 6.3) });
+    // per-weapon muzzle flash: that weapon's 3-frame row of the 'muzzle' sheet at the barrel tip (the sheet carries
+    // the hue; the particle tint only warms it toward the weapon colour), plus a hot core glow
+    const row = MUZZLE_ROW[e.weapon];
+    if (row !== undefined) this.flashes.spawn({ pos: ma(m, 4, e.dir), life: MUZZLE_MS[e.weapon] || 70, size: MUZZLE_SIZE[e.weapon] || 14, grow: 0.35, color: rgb(c).map((x) => 0.75 + x * 0.35), alpha: 1, fade: 5, frame: row * MUZZLE_FRAMES, anim: MUZZLE_FRAMES, rot: e.weapon === WEAPONS.RAIL || e.weapon === WEAPONS.PLASMA ? 0 : rnd(0, 6.3) });
     this.glow.spawn({ pos: m, life: 60, size: 7, color: [1.2, 1.15, 1.05], alpha: 0.9, fade: 1, px: 40 });
     if (e.weapon === WEAPONS.SHOTGUN || e.weapon === WEAPONS.MACHINEGUN) this.smoke.spawn({ pos: ma(m, 8, e.dir), vel: [e.dir[0] * 40, e.dir[1] * 40, e.dir[2] * 40 + 12], life: 400, size: 6, grow: 2, color: [0.5, 0.48, 0.45], alpha: 0.35, fade: 3, frame: -1, rot: rnd(0, 6.3) });
   }
@@ -199,9 +205,11 @@ export class Effects {
       // off the surface along its normal so its inverse-square falloff cannot blow the wall out
       const n = tr.fraction < 1 && tr.plane ? tr.plane.n : [-dir[0], -dir[1], -dir[2]];
       b.light.position.set(end[0] + n[0] * 24, end[1] + n[1] * 24, end[2] + n[2] * 24); b.light.intensity = 900 + Math.random() * 400;
-      // end sizzle: a flickering glow at the hit point plus continuous sparks (world or flesh); all screen-size
-      // capped, so at point blank they stay small dots instead of covering the view
+      // end sizzle: a flickering glow at the hit point, an animated electric sizzle sprite every ~70 ms and
+      // continuous sparks (world or flesh); all screen-size capped, so at point blank they stay small dots instead
+      // of covering the view
       this.glow.spawn({ pos: ma(end, 2, n), life: 40, size: rnd(6, 11), color: [0.7, 0.85, 1.2], alpha: 0.8, fade: 1, px: 48 });
+      if (tr.fraction < 1 && now - (b.sizzleAt || 0) > 70) { b.sizzleAt = now; this.sizzle.spawn({ pos: ma(end, 3, n), life: 110, size: rnd(14, 22), grow: 0.4, color: [0.9, 0.95, 1.1], alpha: 0.95, fade: 1, frame: 0, anim: 4, rot: rnd(0, 6.3), px: 120 }); }
       if (tr.fraction < 1 && Math.random() < dt * 40) {
         this.sparks.spawn({ pos: end, vel: [(n[0] + rnd(-0.8, 0.8)) * rnd(80, 220), (n[1] + rnd(-0.8, 0.8)) * rnd(80, 220), (n[2] + rnd(-0.5, 1)) * rnd(80, 220)], life: rnd(150, 350), size: 1.8, color: [0.85, 0.95, 1.15], gravity: 600, fade: 3, px: 28 });
         if (Math.random() < 0.3) this.rings.spawn({ pos: ma(end, 3, n), life: 160, size: 6, grow: 3, color: [0.5, 0.7, 1.1], alpha: 0.6, fade: 1, frame: 0, px: 70 });
@@ -361,7 +369,7 @@ export class Effects {
     this.impact(end, normalize(sub(start, end)), WEAPONS.RAIL, color);
   }
   lgHit(origin, world, normal) {
-    if (!world) { this.bloodSpray(origin, 8); return; }
+    if (!world) { this.bloodSpray(origin, 8); this.sizzle.spawn({ pos: [origin[0], origin[1], origin[2] + rnd(-4, 12)], life: 100, size: 16, color: [0.9, 0.95, 1.1], alpha: 0.9, fade: 1, frame: 0, anim: 4, rot: rnd(0, 6.3), px: 100 }); return; }
     const n = normal || [0, 0, 1];
     for (let i = 0; i < 4; i++) this.sparks.spawn({ pos: origin, vel: [(n[0] + rnd(-1, 1)) * rnd(100, 260), (n[1] + rnd(-1, 1)) * rnd(100, 260), (n[2] + rnd(-0.3, 1)) * rnd(100, 260)], life: rnd(200, 400), size: 1.8, color: [0.8, 0.92, 1.1], gravity: 600, fade: 3, px: 28 });
     if (Math.random() < 0.15) this.decal(origin, n, 8, 0.5, 8000);
@@ -374,7 +382,11 @@ export class Effects {
     this.flash(ma(origin, rail ? 22 : 16, normal), color, rail ? 2400 : 450, rail ? 300 : 160, rail ? 300 : 120);
     this.glow.spawn({ pos: ma(origin, 2, normal), life: rail ? 260 : 90, size: rail ? 18 : 5, grow: 0.8, color: rgb(color).map((c) => c * 1.25), alpha: 0.85, fade: 1, px: rail ? 160 : 48 });
     if (rail) this.rings.spawn({ pos: ma(origin, 3, normal), life: 300, size: 6, grow: 3, color: railGlow, alpha: 0.7, fade: 3, frame: 2 });
-    const n = rail ? 16 : 5;
+    if (rail) for (let i = 0; i < 6; i++) { // a few slow bright embers in the shooter's colour hang at the mark
+      const dir = normalize([normal[0] + rnd(-0.5, 0.5), normal[1] + rnd(-0.5, 0.5), normal[2] + rnd(-0.3, 0.6)]), spd = rnd(30, 90);
+      this.glow.spawn({ pos: origin, vel: [dir[0] * spd, dir[1] * spd, dir[2] * spd], life: rnd(400, 700), size: rnd(2.5, 4), color: railGlow, alpha: 0.9, gravity: 300, drag: 1.5, fade: 3, px: 30 });
+    }
+    const n = rail ? 20 : 5;
     for (let i = 0; i < n; i++) {
       const dir = normalize([normal[0] + rnd(-0.7, 0.7), normal[1] + rnd(-0.7, 0.7), normal[2] + rnd(-0.7, 0.7)]);
       const spd = rnd(100, 320);
@@ -385,13 +397,18 @@ export class Effects {
     if (!rail) for (let i = 0; i < 3; i++) this.sparks.spawn({ pos: origin, vel: [(normal[0] + rnd(-0.5, 0.5)) * rnd(60, 160), (normal[1] + rnd(-0.5, 0.5)) * rnd(60, 160), (normal[2] + rnd(0, 0.8)) * rnd(60, 160)], life: rnd(300, 500), size: 1.4, color: [0.45, 0.42, 0.38], alpha: 0.9, gravity: 800, fade: 3, px: 16 }); // stone chips
     this.decal(origin, normal, rail ? 18 : 7, rail ? 0.7 : 0.85, 15000, rail ? 'scorch' : 'bullet');
   }
-  bloodSpray(origin, damage) {
-    const n = Math.min(18, 3 + Math.floor(damage / 6));
+  // Blood: droplets thrown mostly away from the shooter (`dir` = shot direction, null = all round), a burst puff at
+  // the wound and a slower dark mist that hangs for a moment; heavier hits throw more and farther.
+  bloodSpray(origin, damage, dir = null) {
+    const n = Math.min(22, 3 + Math.floor(damage / 5)), heavy = Math.min(1, damage / 60);
     for (let i = 0; i < n; i++) {
-      const a = Math.random() * 6.28, s = rnd(60, 220);
-      this.blood.spawn({ pos: [origin[0], origin[1], origin[2] + rnd(-6, 14)], vel: [Math.cos(a) * s, Math.sin(a) * s, rnd(20, 180)], life: rnd(350, 650), size: rnd(4, 8), grow: 0.6, color: [1, 1, 1], alpha: 0.95, gravity: 800, fade: 3, frame: -1, rot: rnd(0, 6.3), spin: rnd(-4, 4) });
+      const a = Math.random() * 6.28, s = rnd(60, 220 + heavy * 120);
+      let vx = Math.cos(a) * s, vy = Math.sin(a) * s;
+      if (dir) { vx = vx * 0.45 + dir[0] * s * 0.9; vy = vy * 0.45 + dir[1] * s * 0.9; }
+      this.blood.spawn({ pos: [origin[0], origin[1], origin[2] + rnd(-6, 14)], vel: [vx, vy, rnd(20, 180) + (dir ? dir[2] * s * 0.6 : 0)], life: rnd(350, 650), size: rnd(3.5, 7.5), grow: 0.6, color: [1, 1, 1], alpha: 0.95, gravity: 800, fade: 3, frame: -1, rot: rnd(0, 6.3), spin: rnd(-4, 4) });
     }
-    this.blood.spawn({ pos: [origin[0], origin[1], origin[2] + 6], life: 260, size: 18, grow: 1.4, color: [0.9, 0.9, 0.9], alpha: 0.7, fade: 1, frame: -1, rot: rnd(0, 6.3) }); // the burst itself
+    this.blood.spawn({ pos: [origin[0], origin[1], origin[2] + 6], life: 260, size: 16 + heavy * 8, grow: 1.4, color: [0.9, 0.9, 0.9], alpha: 0.75, fade: 1, frame: -1, rot: rnd(0, 6.3) }); // the burst itself
+    for (let i = 0; i < 2 + Math.floor(heavy * 2); i++) this.blood.spawn({ pos: [origin[0] + (dir ? dir[0] * 10 : 0), origin[1] + (dir ? dir[1] * 10 : 0), origin[2] + rnd(0, 12)], vel: [dir ? dir[0] * 40 : rnd(-20, 20), dir ? dir[1] * 40 : rnd(-20, 20), rnd(10, 30)], life: rnd(500, 800), size: rnd(10, 16), grow: 1.6, color: [0.55, 0.5, 0.5], alpha: 0.45, fade: 4, frame: -1, rot: rnd(0, 6.3), spin: rnd(-1, 1), drag: 2 }); // mist
   }
   gibs(origin) {
     for (let i = 0; i < 10; i++) {
@@ -424,10 +441,19 @@ export class Effects {
     for (let i = 0; i < 40; i++) { const a = Math.random() * 6.28, r = rnd(4, 18); this.glow.spawn({ pos: [origin[0] + Math.cos(a) * r, origin[1] + Math.sin(a) * r, origin[2] + rnd(-24, 30)], vel: [Math.cos(a) * rnd(10, 60), Math.sin(a) * rnd(10, 60), rnd(-40, 90)], life: rnd(400, 800), size: rnd(3, 6), color: [0.7, 0.5, 1], alpha: 0.9, fade: 3, drag: 1 }); }
     for (let i = 0; i < 4; i++) this.rings.spawn({ pos: [origin[0], origin[1], origin[2] - 20 + i * 14], vel: [0, 0, 70], life: 500, size: 30, grow: 1.2, color: [0.8, 0.6, 1.2], alpha: 0.8, fade: 1, frame: 2, delay: i * 50 }); // rising rings
   }
+  // Pickup burst: a glow, an expanding ring and a spray of sparkles thrown up from the item spot.
   pickupFlash(origin, color = 0xffffff, scale = 1) {
     this.glow.spawn({ pos: origin, life: 260, size: 28 * scale, grow: 1.8, color: rgb(color), alpha: 0.8, fade: 1 });
     this.rings.spawn({ pos: origin, life: 300, size: 14 * scale, grow: 3, color: rgb(color), alpha: 0.7, fade: 1, frame: 0 });
     for (let i = 0; i < 8 * scale; i++) { const a = Math.random() * 6.28; this.glow.spawn({ pos: origin, vel: [Math.cos(a) * rnd(30, 90), Math.sin(a) * rnd(30, 90), rnd(20, 120)], life: rnd(300, 500), size: 4, color: [1, 1, 1], alpha: 0.9, fade: 3 }); }
+    for (let i = 0; i < 6 * scale; i++) { const a = Math.random() * 6.28, r = rnd(4, 14); this.shimmer.spawn({ pos: [origin[0] + Math.cos(a) * r, origin[1] + Math.sin(a) * r, origin[2] + rnd(-10, 10)], vel: [0, 0, rnd(40, 110)], life: rnd(350, 600), size: rnd(4, 7), color: rgb(color).map((c) => 0.6 + c * 0.6), alpha: 0.9, fade: 2, rot: rnd(0, 6.3), spin: rnd(-3, 3), shrink: 0.5 }); }
+  }
+  // Item respawn shimmer: a column of slow twinkling stars rising through the item spot with a soft pulse at the
+  // base, ~0.6 s (the item itself scales up in ItemView).
+  respawnShimmer(origin) {
+    this.glow.spawn({ pos: [origin[0], origin[1], origin[2] - 6], life: 400, size: 22, grow: 1.2, color: [0.9, 0.95, 1.1], alpha: 0.6, fade: 2 });
+    this.rings.spawn({ pos: [origin[0], origin[1], origin[2] - 16], life: 450, size: 20, grow: 1.6, color: [0.8, 0.9, 1.1], alpha: 0.6, fade: 1, frame: 1 });
+    for (let i = 0; i < 16; i++) { const a = Math.random() * 6.28, r = rnd(3, 16); this.shimmer.spawn({ pos: [origin[0] + Math.cos(a) * r, origin[1] + Math.sin(a) * r, origin[2] - 20 + rnd(0, 10)], vel: [Math.cos(a) * rnd(-6, 6), Math.sin(a) * rnd(-6, 6), rnd(35, 80)], life: rnd(450, 800), size: rnd(3, 6.5), color: [1, 1, 1.1], alpha: 0.95, fade: 2, rot: rnd(0, 6.3), spin: rnd(-4, 4), delay: rnd(0, 250) }); }
   }
   // Persistent teleporter portal: two counter-rotating soft discs + a slow particle drizzle (built at map load).
   makePortal(center, w, h, scene) {
@@ -444,7 +470,7 @@ export class Effects {
   warmup(o = [0, 0, 0], camera = null) {
     const n = [0, 0, 1];
     this.explosion(o, n, WEAPONS.ROCKET); this.explosion(o, n, WEAPONS.PLASMA); this.railTrail(o, ma(o, 100, [1, 0, 0]), true); this.impact(o, n, WEAPONS.MACHINEGUN);
-    this.bloodSpray(o, 40); this.gibs(o); this.padBurst(o); this.teleFlash(o); this.pickupFlash(o);
+    this.bloodSpray(o, 40, [1, 0, 0]); this.gibs(o); this.padBurst(o); this.teleFlash(o); this.pickupFlash(o); this.respawnShimmer(o); this.lgHit(o, false);
     this.remoteFire({ id: -1, weapon: WEAPONS.SHOTGUN, origin: o, dir: [1, 0, 0] }, null);
     // the decal program (vertex colour + alpha) needs a real draw: the warm point is usually in mid-air, where the
     // explosion above finds no face to mark, so a synthetic decal quad is drawn here and dropped by purge()

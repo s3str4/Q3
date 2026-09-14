@@ -189,6 +189,21 @@ score boxes, obituaries and the scoreboard show names in their colours. The sess
 or colour index means the defaults); bots keep their name-derived skins and the default colours. The protocol
 version stays 4: the new fields are optional on both sides.
 
+**Models, weapons and effects** (all procedural, no external assets): the three skins hang different parts on one
+skeleton (Sarge: helmet with a visor slit, chest armour, round shoulder pads, belt pouches, backpack; Visor: full
+helmet with a wrap-around glowing visor band, angular cyborg plates and glowing seams down the limbs and spine;
+Anarki: bare head with goggles and a hair crest, open jacket over a bare chest, knee pads), each bone merged into one
+mesh per material (~35 draw calls a player). They run with a leg cycle and torso lean, roll into strafes, tuck the
+legs in the air, crouch, pitch the torso with the aim, hold big weapons two-handed and swing the free arm with the
+machinegun / gauntlet, fall three ways when killed and vanish into gibs on a gib death. The seven weapons are the same
+meshes in first and third person: bevelled plates, recessed panel lines, bolts, vents and cooling holes, a loaded
+rocket in the launcher's bell, ringed energy coils on the railgun, rods with a crawling arc on the lightning gun, a
+pulsing plasma core, a grooved pump the left hand rides on the shotgun, a brass belt on the machinegun and a hooked
+saw blade with a motion-blur ring that fades in as the gauntlet spins up. Each weapon has its own 3-frame muzzle flash
+(one sprite-sheet row, ~80 ms) at the barrel tip of both views; the rocket explosion plays a 32-frame fireball with a
+white-hot core, a shock ring and a pooled point light; lightning hits sizzle with an animated electric sprite; blood
+sprays away from the shooter with a hanging mist; items respawn in a shimmer of rising stars.
+
 **Keys**: the panel lists every action (move, jump, crouch, fire, zoom, weapons 1-7, next / previous weapon,
 scoreboard) with its current binding. Click a binding, then press a key, a mouse button or turn the wheel to rebind
 it (Esc cancels); a key can only drive one action, so binding it elsewhere unbinds it there. Mouse buttons appear as

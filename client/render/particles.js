@@ -75,6 +75,14 @@ function spriteTexture(kind) {
       const k = (r - 0.8) / 0.13; a = Math.exp(-k * k) * (r < 1 ? 1 : 0);
     } else if (kind === 'streak') { // spark streak: bright horizontal line with a hot centre
       const k = Math.abs(dy) * 2 / 0.22; a = Math.exp(-k * k) * Math.max(0, 1 - Math.pow(Math.abs(dx) * 2, 3));
+    } else if (kind === 'blur') { // spinning-blade motion blur: a translucent annulus of tangential streaks, soft at both rims
+      const ang = Math.atan2(dy, dx);
+      const streak = 0.55 + 0.45 * Math.sin(ang * 36 + r * 40) * Math.sin(ang * 7);
+      a = smooth(0.42, 0.62, r) * smooth(1.0, 0.9, r) * (0.7 + 0.3 * streak) * (r > 0.8 ? 1 : 0.8);
+      rgb = 0.85 + 0.15 * streak;
+    } else if (kind === 'shimmer') { // item respawn shimmer: a soft 4-point star
+      const cx = Math.abs(dx) * 2, cy = Math.abs(dy) * 2;
+      a = Math.max(Math.exp(-(cx * cx) / 0.02) * Math.max(0, 1 - cy), Math.exp(-(cy * cy) / 0.02) * Math.max(0, 1 - cx)) * 0.9 + Math.max(0, 1 - r * 3) * 0.6;
     } else { // smoke: a dense ragged puff (Q3 smokePuff look): solid enough that one puff reads on its own, soft edge
       const n = Math.sin(x * 0.9 + Math.sin(y * 0.7) * 3) * 0.5 + Math.sin(y * 1.3 + x * 0.4) * 0.5;
       a = Math.max(0, 1 - r * (1.02 + n * 0.14)); a = Math.pow(a * a * (3 - 2 * a), 0.8) * 0.95;
@@ -117,26 +125,27 @@ function fireColor(px, heat, a) {
 }
 function sheetTexture(kind) {
   switch (kind) {
-    case 'explosion': // 16-frame fireball: a lumpy ball of fire that bursts, billows outward, cools to red and thins into soot
-      return sheet(4, 4, 64, (px, x, y, fx, fy, r, ang, f) => {
-        const t = f / 15;
-        const R = 0.3 + 0.62 * Math.pow(t, 0.55);                         // outer radius grows fast then settles
-        // lobes: several blobs pushed outward with time, each with its own angular position
+    case 'explosion': // 32-frame fireball (8x4): a white-hot burst that billows into a lumpy ball of fire, cools to red and thins into soot
+      return sheet(8, 4, 64, (px, x, y, fx, fy, r, ang, f) => {
+        const t = f / 31;
+        const R = 0.28 + 0.64 * Math.pow(t, 0.5);                          // outer radius grows fast then settles
+        // lobes: several blobs pushed outward with time, each with its own angular position and drift
         let field = 0;
-        for (let k = 0; k < 5; k++) {
-          const ba = k * 1.2566 + hash(k, 3) * 0.8, bd = (0.12 + 0.3 * t) * (0.6 + hash(k, 7) * 0.6), br = R * (0.45 + hash(k, 11) * 0.25) * (1 - t * 0.25);
+        for (let k = 0; k < 7; k++) {
+          const ba = k * 0.8976 + hash(k, 3) * 0.8 + t * (hash(k, 5) - 0.5) * 0.6, bd = (0.1 + 0.32 * t) * (0.6 + hash(k, 7) * 0.6), br = R * (0.42 + hash(k, 11) * 0.25) * (1 - t * 0.25);
           const bx = Math.cos(ba) * bd, by = Math.sin(ba) * bd;
           const dd = Math.hypot(fx - bx, fy - by) / br;
           field += Math.max(0, 1 - dd * dd);
         }
-        field += Math.max(0, 1 - (r / (R * 0.7)) ** 2) * (1.2 - t * 0.9);  // core mass, fades out with time
+        field += Math.max(0, 1 - (r / (R * 0.7)) ** 2) * (1.3 - t * 0.95);  // core mass, fades out with time
         const turb = fbm(x + f * 17, y + f * 31, 6 + t * 8, 3) - 0.5;       // ragged edge, more turbulent late
-        field += turb * (0.35 + 0.6 * t);
+        field += turb * (0.3 + 0.65 * t);
         const body = smooth(0.15, 0.6, field);
         if (body <= 0) return;
-        // heat: white only in the core of the first frames, orange body, red rim; interior grain so overlapping
-        // sprites (additive) stay textured instead of saturating into one flat disc
-        const heat = clamp01((field - 0.25) * (1 - t * 0.85) * 0.65 + (1 - r / R) * 0.22 * Math.max(0, 1 - t * 2.5));
+        // heat: white only in the core of the first frames (a bright flash core over the first ~4 frames), orange
+        // body, red rim; interior grain so overlapping sprites (additive) stay textured instead of saturating into one disc
+        const flash = Math.max(0, 1 - t * 8) * Math.max(0, 1 - r / (R * 0.8));
+        const heat = clamp01((field - 0.25) * (1 - t * 0.85) * 0.65 + (1 - r / R) * 0.22 * Math.max(0, 1 - t * 2.5) + flash * 0.6);
         const grain = 0.55 + 0.45 * clamp01(0.5 + turb * 2.4);
         const fade = t < 0.3 ? 1 : 1 - (t - 0.3) / 0.7;
         fireColor(px, heat, body * fade * grain);
@@ -166,6 +175,49 @@ function sheetTexture(kind) {
         const core = smooth(0.35, 0.05, r);
         px[0] = 1; px[1] = mix(0.75, 1, core); px[2] = mix(0.35, 0.9, core); px[3] = a;
       });
+    case 'muzzle': // per-weapon muzzle flashes: 6 rows (MUZZLE_ROW order: MG, SG, RL, LG, RG, PG) x 3 frames played over ~80 ms
+      return sheet(3, 6, 64, (px, x, y, fx, fy, r, ang, f) => {
+        const row = Math.floor(f / 3), fr = f % 3, t = fr / 2;          // t: 0 burst, 0.5 full, 1 dying
+        const grow = 0.75 + 0.35 * t, die = 1 - t * 0.55;
+        const n = fbm(x * 2 + row * 40 + fr * 13, y * 2 + fr * 7, 6, 2);
+        let a = 0, R = 1, G = 1, B = 1;
+        if (row === 0) { // machinegun: a 6-point star, hot yellow-white core
+          const spikes = Math.pow(Math.max(0, Math.cos((ang + fr * 0.5) * 3)), 6) * 0.55 + Math.pow(Math.max(0, Math.cos((ang - fr * 0.9 + 0.5) * 4)), 10) * 0.4;
+          const reach = (0.3 + spikes * 0.6) * grow; a = smooth(reach, reach * 0.3, r) * (0.75 + 0.25 * n);
+          const core = smooth(0.3, 0.05, r); R = 1; G = mix(0.78, 1, core); B = mix(0.3, 0.85, core);
+        } else if (row === 1) { // shotgun: a wide fan of many tongues, orange rims
+          const spikes = Math.pow(Math.max(0, Math.cos((ang + fr * 0.4) * 5)), 4) * 0.5 + Math.pow(Math.max(0, Math.cos((ang - fr * 0.7 + 0.3) * 7)), 8) * 0.45;
+          const reach = (0.42 + spikes * 0.58) * grow; a = smooth(reach, reach * 0.35, r) * (0.7 + 0.3 * n);
+          const core = smooth(0.4, 0.08, r); R = 1; G = mix(0.6, 1, core); B = mix(0.2, 0.85, core);
+        } else if (row === 2) { // rocket launcher: a fat fireball with a few lobes, orange-red, sooty at the end
+          let field = Math.max(0, 1 - (r / (0.55 * grow)) ** 2) * 1.2;
+          for (let k = 0; k < 4; k++) { const ba = k * 1.57 + fr * 0.6, bd = 0.3 + t * 0.25; field += Math.max(0, 1 - (Math.hypot(fx - Math.cos(ba) * bd, fy - Math.sin(ba) * bd) / (0.38 * grow)) ** 2); }
+          field += (n - 0.5) * 0.6; a = smooth(0.2, 0.7, field);
+          const heat = clamp01(field * 0.5 * (1 - t * 0.5) + (1 - r) * 0.25 * (1 - t)); fireColor(px, heat, 0); R = px[0]; G = px[1]; B = px[2];
+        } else if (row === 3) { // lightning: an electric burst, jagged blue-white arcs off a small core
+          const arcs = Math.pow(Math.max(0, Math.cos((ang + fr * 1.1) * 4 + n * 6)), 12) * 0.7 + Math.pow(Math.max(0, Math.cos((ang - fr * 0.8) * 6 + n * 8)), 16) * 0.5;
+          const reach = (0.3 + arcs * 0.7) * grow; a = smooth(reach, reach * 0.4, r) * (0.6 + 0.4 * n) + smooth(0.28, 0.05, r);
+          const core = smooth(0.3, 0.05, r); R = mix(0.55, 1, core); G = mix(0.75, 1, core); B = 1;
+        } else if (row === 4) { // railgun: a green-cyan disc with a bright ring and radial rays
+          const ring = Math.exp(-((r - 0.62 * grow) ** 2) / 0.008), rays = Math.pow(Math.max(0, Math.cos((ang + fr * 0.6) * 8)), 10) * smooth(0.95, 0.5, r) * 0.6;
+          a = clamp01(smooth(0.5 * grow, 0.05, r) * 0.9 + ring * 0.9 + rays);
+          const core = smooth(0.35, 0.05, r); R = mix(0.35, 1, core); G = 1; B = mix(0.6, 1, core);
+        } else { // plasma: a purple ball with a swirling halo
+          const swirl = Math.pow(Math.max(0, Math.sin(ang * 2 + fr * 0.8 + r * 6)), 5) * smooth(0.9, 0.5, r) * 0.6;
+          a = clamp01(smooth(0.5 * grow, 0.05, r) + swirl + Math.max(0, 1 - r * r) * 0.35);
+          const core = smooth(0.35, 0.05, r); R = mix(0.7, 1, core); G = mix(0.4, 0.95, core); B = 1;
+        }
+        px[0] = R; px[1] = G; px[2] = B; px[3] = clamp01(a) * die;
+      });
+    case 'sizzle': // 4-frame lightning hit sizzle: a bright blob throwing short jagged arcs that thin out
+      return sheet(2, 2, 64, (px, x, y, fx, fy, r, ang, f) => {
+        const t = f / 3, n = fbm(x * 2 + f * 31, y * 2 + f * 17, 5, 2);
+        const arcs = Math.pow(Math.max(0, Math.cos(ang * 5 + f * 1.3 + n * 7)), 14) * 0.8 + Math.pow(Math.max(0, Math.cos(ang * 3 - f * 0.9 + n * 5)), 10) * 0.5;
+        const reach = 0.25 + arcs * (0.45 + t * 0.35);
+        const a = smooth(reach, reach * 0.4, r) * (0.6 + 0.4 * n) * (1 - t * 0.5) + smooth(0.3 - t * 0.15, 0.03, r);
+        const core = smooth(0.3, 0.05, r);
+        px[0] = mix(0.5, 1, core); px[1] = mix(0.75, 1, core); px[2] = 1; px[3] = clamp01(a);
+      });
     case 'plasma': // 4-frame swirling bolt: white core, two rotating arcs, purple halo
       return sheet(2, 2, 64, (px, x, y, fx, fy, r, ang, f) => {
         const rotA = f * 0.8;
@@ -194,6 +246,9 @@ function sheetTexture(kind) {
 }
 const SHEETS = {};
 export function getSheet(kind) { return SHEETS[kind] || (SHEETS[kind] = sheetTexture(kind)); }
+// row of the 'muzzle' sheet per weapon id (WEAPONS: MG 2, SG 3, RL 5, LG 6, RG 7, PG 8); the gauntlet has no flash
+export const MUZZLE_ROW = { 2: 0, 3: 1, 5: 2, 6: 3, 7: 4, 8: 5 };
+export const MUZZLE_FRAMES = 3;
 
 // Half the render-target height in pixels, shared by every pool's screen-size clamp (the renderer sets it on resize).
 const HALF_H = { value: 540 };
