@@ -86,6 +86,7 @@ export function build(m) {
   R('seRoom', [352, -800, ZS], [800, -352, 272], 'room', { wall: 'concrete', floor: 'floor', ceil: 'ceiling' });
   D('seDoor', [672, -352, Z1], [800, -320, 256], HALL);                  // the doorway through the wall into east mid
   sh.build();
+  m.rooms = meta.rooms.map((r) => ({ name: r.name, mins: r.mins, maxs: r.maxs, cls: r.cls })); // for the renderer's detail pass (pipes, cables, vents, lintels...)
 
   // ---------------- stairs, landings, platforms ----------------
   // (each L stair hall: steps along its first leg, a solid landing at the top height for the rest of the leg)

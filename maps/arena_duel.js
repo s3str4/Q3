@@ -59,7 +59,10 @@ const COR = [-208, -48];       // x range of the south hub->chamber corridor (no
 export function build(m) {
   m.title = meta.title; m.author = meta.author;
   meta.rooms.length = 0; meta.corridorSamples.length = 0;
-  m.ambient = { sky: '#06080f', fog: ['#06080f', 1800, 6500], hemi: ['#5f6f93', '#26180e', 0.4], sun: null, music: 'arena' };
+  m.ambient = { sky: '#06080f', fog: ['#06080f', 1800, 6500], hemi: ['#5f6f93', '#26180e', 0.4], sun: null, music: 'arena',
+    // sky dome seen through the atria's and the hub's open ceilings (client/render/materials.js skyMaterial): a deep
+    // violet night with a faint nebula band and stars, the gothic-arena sky
+    skyDome: { zenith: '#101a44', horizon: '#3a2240', cloud: '#3c2a4c', stars: 1.0, clouds: 0.6, speed: 0.008 } };
 
   // ---------------- rooms (voids) ----------------
   const sh = new Shell(m, 32);
@@ -89,6 +92,7 @@ export function build(m) {
   }
   R('hub', [-HUB, -HUB, L0], [HUB, HUB, 448], 'room', { wall: 'wall2', floor: 'floor', ceil: 'sky' });
   sh.build();
+  m.rooms = meta.rooms.map((r) => ({ name: r.name, mins: r.mins, maxs: r.maxs, cls: r.cls })); // for the renderer's detail pass (cornices, lintels, beams...)
 
   // corridor width samples (point, narrow axis)
   meta.corridorSamples.push(

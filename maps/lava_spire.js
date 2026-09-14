@@ -48,7 +48,8 @@ const SLAB = 32;
 export function build(m) {
   m.title = meta.title; m.author = meta.author;
   meta.rooms.length = 0; meta.corridorSamples.length = 0; meta.pads.length = 0; meta.lavaBoxes.length = 0;
-  m.ambient = { sky: '#090302', fog: ['#160804', 1600, 6000], hemi: ['#a06a48', '#2a0c04', 0.22], sun: null, music: 'arena' };
+  m.ambient = { sky: '#090302', fog: ['#160804', 1600, 6000], hemi: ['#a06a48', '#2a0c04', 0.22], sun: null, music: 'arena',
+    skyDome: { zenith: '#180608', horizon: '#4a1a0c', cloud: '#52240f', stars: 0.35, clouds: 0.9, speed: 0.02 } }; // smoke-lit volcanic sky over the crater
 
   // ---------------- rooms (voids) ----------------
   const sh = new Shell(m, 32);
@@ -61,6 +62,7 @@ export function build(m) {
   R('deckDoor', [CR, 384, L2], [640, 576, 448], 'hall', { wall: 'wall2', floor: 'floor2', ceil: 'trim' }, 0);
   R('vault', [640, -256, L1], [1152, 576, 480], 'room', { wall: 'wall2', floor: 'floor', ceil: 'ceiling' });
   sh.build();
+  m.rooms = meta.rooms.map((r) => ({ name: r.name, mins: r.mins, maxs: r.maxs, cls: r.cls })); // for the renderer's detail pass
 
   // ---------------- the pit: a plus of lava arms around the spire, pillars in the concave corners ----------------
   // lava region = ({|x| < ARM, |y| < ARML} U {-ARM < x < ARML, |y| < ARM}) minus the spire column: five disjoint boxes.
