@@ -67,7 +67,8 @@ export function entityBrush(e) {
   };
 }
 
-function traceThroughBrush(tw, brush, start, end, offsets, hitBrush, hitEntity) {
+// (exported for the lighting bake, which runs the same sweep over a spatial grid of candidate brushes)
+export function traceThroughBrush(tw, brush, start, end, offsets, hitBrush, hitEntity) {
   let enterFrac = -1, leaveFrac = 1;
   let clipplane = null;
   let getout = false, startout = false;

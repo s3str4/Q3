@@ -3,7 +3,7 @@
 // This bake IS the world's diffuse lighting (id Tech 3 lightmap role): the renderer's real-time copies of the map
 // lights only add specular / normal-map response on the world (see world.js bakedMaterial). Runs off the main
 // thread; results stream back in chunks so the world lights up progressively without ever stalling a frame.
-import { traceBox } from '../../shared/trace.js';
+import { traceBox, pointContents, makeTrace, traceThroughBrush } from '../../shared/trace.js';
 
 const SKIP = 2 | 4; // NODRAW | PLAYERCLIP never occlude light
 
@@ -64,11 +64,59 @@ const falloff = (d, r) => { const q = Math.min(1, (POOL_R * POOL_R) / (d * d)); 
 const satur = (c) => { const l = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; return c.map((x) => Math.max(0, x + (x - l) * AMBIENT_SAT)); };
 const desat = (c) => { const l = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; return c.map((x) => x + (l - x) * LIGHT_DESAT); };
 
-self.onmessage = (ev) => {
-  const { brushes, lights, surfaceLights, ambient, positions, normals, chunk, params } = ev.data;
+// ---- brush grid: every trace here is a point sweep, so the candidate brushes are read off a uniform grid over the
+// map (cell GRID_CELL) instead of scanning the whole list per ray; the sweep itself is the shared traceThroughBrush,
+// so a hit is the same hit the collision tracer would report (tests/bake_grid.test.mjs asserts the bake is identical
+// to the brute-force traceBox one). ~100 rays per vertex x 40-60k vertices: this is what keeps the bake in seconds. ----
+const GRID_CELL = 128;
+function buildGrid(brushes) {
+  if (!brushes.length) return null;
+  const mins = [Infinity, Infinity, Infinity], maxs = [-Infinity, -Infinity, -Infinity];
+  for (const b of brushes) for (let i = 0; i < 3; i++) { mins[i] = Math.min(mins[i], b.mins[i]); maxs[i] = Math.max(maxs[i], b.maxs[i]); }
+  const n = [0, 1, 2].map((i) => Math.max(1, Math.ceil((maxs[i] - mins[i]) / GRID_CELL) + 1));
+  const cells = new Array(n[0] * n[1] * n[2]);
+  const idx = (x, y, z) => (z * n[1] + y) * n[0] + x;
+  const cellOf = (v, i) => Math.max(0, Math.min(n[i] - 1, Math.floor((v - mins[i]) / GRID_CELL)));
+  brushes.forEach((b, bi) => {
+    const x0 = cellOf(b.mins[0], 0), x1 = cellOf(b.maxs[0], 0), y0 = cellOf(b.mins[1], 1), y1 = cellOf(b.maxs[1], 1), z0 = cellOf(b.mins[2], 2), z1 = cellOf(b.maxs[2], 2);
+    for (let z = z0; z <= z1; z++) for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) { const k = idx(x, y, z); (cells[k] || (cells[k] = [])).push(bi); }
+  });
+  return { n, cells, idx, cellOf, stamp: new Int32Array(brushes.length), tick: 0, cand: new Int32Array(brushes.length) };
+}
+const ZERO_OFFS = new Array(8).fill([0, 0, 0]);
+function gridTrace(grid, brushes, start, end, skipFlags) {
+  const tw = makeTrace(start, end);
+  const bmin = [Math.min(start[0], end[0]) - 1, Math.min(start[1], end[1]) - 1, Math.min(start[2], end[2]) - 1];
+  const bmax = [Math.max(start[0], end[0]) + 1, Math.max(start[1], end[1]) + 1, Math.max(start[2], end[2]) + 1];
+  const x0 = grid.cellOf(bmin[0], 0), x1 = grid.cellOf(bmax[0], 0), y0 = grid.cellOf(bmin[1], 1), y1 = grid.cellOf(bmax[1], 1), z0 = grid.cellOf(bmin[2], 2), z1 = grid.cellOf(bmax[2], 2);
+  // gather the candidates (deduplicated by stamp), then sweep them in brush-array order: an exact tie at a seam
+  // (a ray entering a floor and the wall standing on it at the same fraction) resolves to the same brush as traceBox
+  const tick = ++grid.tick, stamp = grid.stamp, cand = grid.cand; let k = 0;
+  for (let z = z0; z <= z1; z++) for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    const list = grid.cells[grid.idx(x, y, z)]; if (!list) continue;
+    for (let i = 0; i < list.length; i++) { const bi = list[i]; if (stamp[bi] !== tick) { stamp[bi] = tick; cand[k++] = bi; } }
+  }
+  const sorted = cand.subarray(0, k).sort();
+  for (let i = 0; i < k; i++) {
+    const b = brushes[sorted[i]];
+    if (b.nonsolid || (b.flags & skipFlags)) continue;
+    if (b.maxs[0] < bmin[0] || b.mins[0] > bmax[0] || b.maxs[1] < bmin[1] || b.mins[1] > bmax[1] || b.maxs[2] < bmin[2] || b.mins[2] > bmax[2]) continue;
+    traceThroughBrush(tw, b, start, end, ZERO_OFFS, b, null);
+    if (tw.allsolid) break;
+  }
+  if (tw.fraction < 1) for (let i = 0; i < 3; i++) tw.endpos[i] = start[i] + tw.fraction * (end[i] - start[i]);
+  return tw;
+}
+
+// The bake itself; post(msg, transfer) receives the progress chunks and the final { done }. Exported so tests can run
+// it in Node (params.grid === false selects the brute-force tracer for the equivalence check).
+export function bake(data, post) {
+  const { brushes, lights, surfaceLights, ambient, positions, normals, chunk, params, job } = data;
   // tunables can be overridden per bake (tools/screenshots.mjs --sweep re-bakes the loaded map with variants)
   if (params) ({ DIRECT = DIRECT, POOL_R = POOL_R, AMBIENT = AMBIENT, BOUNCE = BOUNCE, LIGHT_DESAT = LIGHT_DESAT, AMBIENT_SAT = AMBIENT_SAT, SKY = SKY, SKY_DESAT = SKY_DESAT, SURFACE = SURFACE, AO_POW = AO_POW } = params);
   const world = { brushes };
+  const grid = params && params.grid === false ? null : buildGrid(brushes);
+  const trace = grid ? (a, b) => gridTrace(grid, brushes, a, b, SKIP) : (a, b) => traceBox(world, a, b, undefined, undefined, null, { skipFlags: SKIP });
   const sky = satur(lin(hex(ambient.hemi ? ambient.hemi[0] : '#8fa3c7'))), ground = satur(lin(hex(ambient.hemi ? ambient.hemi[1] : '#20160f')));
   const hemiI = (ambient.hemi ? ambient.hemi[2] : 0.35) * AMBIENT; // AO-modulated ambient: the only fill light the world gets
   // skylight colour: the hue of the ambient's sky half at unit luminance (SKY sets the strength), treated like a light
@@ -77,6 +125,7 @@ self.onmessage = (ev) => {
   const SL = (surfaceLights || []).map((l) => ({ o: [l.o[0] + l.n[0] * SL_OFF, l.o[1] + l.n[1] * SL_OFF, l.o[2] + l.n[2] * SL_OFF], n: l.n, c: desat(l.c), i: l.a * SURFACE }));
   const sunDir = ambient.sun ? norm(ambient.sun.dir || [0.3, 0.2, 1]) : null;
   const sunC = ambient.sun ? lin(hex(ambient.sun.color || '#fff2dd')) : null, sunI = ambient.sun ? (ambient.sun.intensity || 1.5) : 0;
+  const t0 = (typeof performance !== "undefined" ? performance : Date).now(), startedAt = Date.now();
   const count = positions.length / 3;
   const out = new Float32Array(count * 3);
   const start = [0, 0, 0], end = [0, 0, 0], bounce = [0, 0, 0];
@@ -96,6 +145,10 @@ self.onmessage = (ev) => {
     const px = positions[i * 3], py = positions[i * 3 + 1], pz = positions[i * 3 + 2];
     const n = [normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2]];
     start[0] = px + n[0] * 0.6; start[1] = py + n[1] * 0.6; start[2] = pz + n[2] * 0.6;
+    // a vertex on a solid's boundary whose face leans into it (the lower faces of a detail rock sunk in a floor, the
+    // underside of a cornice butting into a pillar) would start every ray inside the solid and bake black: lift it
+    // clear along its face normal plus straight up before giving up (the solids are the map's real brushes only)
+    if (pointContents(world, start)) { start[0] = px + n[0] * 1.2; start[1] = py + n[1] * 1.2; start[2] = pz + n[2] * 1.2 + 1.5; }
     // --- ambient occlusion: hemisphere rays, distance-weighted; ray hits also feed the bounce estimate ---
     const [t, b] = frame(n);
     let open = 0, skyHit = 0;
@@ -103,7 +156,7 @@ self.onmessage = (ev) => {
     for (const r of RAYS) {
       const dx = t[0] * r[0] + b[0] * r[1] + n[0] * r[2], dy = t[1] * r[0] + b[1] * r[1] + n[1] * r[2], dz = t[2] * r[0] + b[2] * r[1] + n[2] * r[2];
       end[0] = start[0] + dx * AO_DIST; end[1] = start[1] + dy * AO_DIST; end[2] = start[2] + dz * AO_DIST;
-      const tr = traceBox(world, start, end, undefined, undefined, null, { skipFlags: SKIP });
+      const tr = trace(start, end);
       if (tr.fraction >= 1) { open += 1; continue; }
       if (tr.brush && tr.brush.sky) { open += 1; skyHit += 1 - tr.fraction * 0.5; continue; } // sky faces emit, never occlude
       open += Math.pow(tr.fraction, 0.6); // near hits occlude strongly, far hits weakly
@@ -131,7 +184,7 @@ self.onmessage = (ev) => {
       for (let j = 0; j < 4; j++) {
         const jx = ((j & 1) ? 10 : -10), jy = ((j & 2) ? 10 : -10);
         end[0] = l.o[0] + jx; end[1] = l.o[1] + jy; end[2] = l.o[2] + (j % 3 - 1) * 8;
-        const tr = traceBox(world, start, end, undefined, undefined, null, { skipFlags: SKIP });
+        const tr = trace(start, end);
         if (tr.fraction >= 1) vis += 0.25;
       }
       if (vis === 0) continue;
@@ -150,14 +203,14 @@ self.onmessage = (ev) => {
       const q = Math.min(1, (SL_R0 * SL_R0) / (d * d)), w = d / SL_RADIUS;
       const e = ndl * cosE * q * (1 - w * w) * l.i;
       if (e < 0.004) continue;
-      if (d > 12) { const tr = traceBox(world, start, l.o, undefined, undefined, null, { skipFlags: SKIP }); if (tr.fraction < 1) continue; }
+      if (d > 12) { const tr = trace(start, l.o); if (tr.fraction < 1) continue; }
       r += l.c[0] * e; g += l.c[1] * e; bl += l.c[2] * e;
     }
     if (sunDir) {
       const ndl = sunDir[0] * n[0] + sunDir[1] * n[1] + sunDir[2] * n[2];
       if (ndl > 0) {
         end[0] = start[0] + sunDir[0] * 8000; end[1] = start[1] + sunDir[1] * 8000; end[2] = start[2] + sunDir[2] * 8000;
-        const tr = traceBox(world, start, end, undefined, undefined, null, { skipFlags: SKIP });
+        const tr = trace(start, end);
         if (tr.fraction >= 1) { const e = ndl * sunI * 0.6; r += sunC[0] * e; g += sunC[1] * e; bl += sunC[2] * e; }
       }
     }
@@ -165,9 +218,10 @@ self.onmessage = (ev) => {
     if ((i + 1) % chunk === 0 || i === count - 1) {
       const from = Math.floor(i / chunk) * chunk;
       const slice = out.slice(from * 3, (i + 1) * 3);
-      self.postMessage({ from, data: slice }, [slice.buffer]);
+      post({ job, from, data: slice }, [slice.buffer]);
     }
   }
-  self.postMessage({ done: true });
-};
+  post({ job, done: true, ms: (typeof performance !== "undefined" ? performance : Date).now() - t0, startedAt, finishedAt: Date.now() }); // the worker's own compute time (the main thread may be busy painting textures meanwhile)
+}
+if (typeof self !== 'undefined' && typeof self.postMessage === 'function') self.onmessage = (ev) => bake(ev.data, (m, t) => self.postMessage(m, t));
 function norm(v) { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; }
